@@ -1,0 +1,182 @@
+import pytest
+import pytest_asyncio
+import asyncio
+import uuid
+from app.models.interview_question import QuestionCategory, QuestionDifficulty, QuestionSource
+import httpx
+import json
+from sqlalchemy import select, delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models.cv_document import CVDocument, CVStatus
+from app.models.job_application import JobApplication
+from app.models.application_analysis import ApplicationAnalysis, AnalysisStatus
+from app.models.interview_session import InterviewSession, SessionStatus
+from app.models.interview_question import InterviewQuestion
+from app.services.analysis_provider import FakeAnalysisProvider, InterviewQuestionsResult
+from app.schemas.interview_questions import InterviewQuestionSet, InterviewQuestionGenerated
+from app.core.config import settings
+
+@pytest_asyncio.fixture(autouse=True)
+def mock_ai_provider(monkeypatch):
+    import app.services.interview_session
+    fake = FakeAnalysisProvider()
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "fake_key")
+    def fake_get_provider():
+        from app.core.exceptions import ProviderConfigurationError
+        if settings.AI_PROVIDER == "groq" and not settings.GROQ_API_KEY:
+            raise ProviderConfigurationError("Chưa cấu hình GROQ_API_KEY")
+        if settings.AI_PROVIDER != "groq":
+            raise ProviderConfigurationError(f"Provider không hỗ trợ: {settings.AI_PROVIDER}")
+        return fake
+    monkeypatch.setattr(app.services.interview_session, "get_analysis_provider", fake_get_provider)
+    return fake
+
+@pytest_asyncio.fixture
+async def sample_application_ready(async_session: AsyncSession):
+    doc_id = uuid.uuid4()
+    doc = CVDocument(id=doc_id, original_filename="test.pdf", storage_key=f"k_{doc_id}", media_type="application/pdf", size_bytes=100, sha256="abc", status=CVStatus.extracted, extracted_text="Some cv text")
+    async_session.add(doc)
+    app_id = uuid.uuid4()
+    job_app = JobApplication(id=app_id, cv_document_id=doc_id, target_role="Backend Developer Intern", job_description="Some JD")
+    async_session.add(job_app)
+    
+    analysis = ApplicationAnalysis(job_application_id=app_id, status=AnalysisStatus.completed, provider="g", model="m", schema_version="1", prompt_version="1", analysis_data={
+        "summary_vi": "Mock summary",
+        "candidate_level": "junior_ready",
+        "technical_skills": [],
+        "projects": [],
+        "education": [],
+        "strengths": [],
+        "gaps": [],
+        "matched_requirements": [],
+        "missing_requirements": [],
+        "recommended_interview_topics": [],
+        "language_detected": "vi",
+        "warnings": []
+    })
+    async_session.add(analysis)
+    
+    await async_session.commit()
+    try:
+        yield app_id
+    finally:
+        await async_session.execute(delete(InterviewQuestion))
+        await async_session.execute(delete(InterviewSession).where(InterviewSession.job_application_id == app_id))
+        await async_session.execute(delete(ApplicationAnalysis).where(ApplicationAnalysis.job_application_id == app_id))
+        await async_session.execute(delete(JobApplication).where(JobApplication.id == app_id))
+        await async_session.execute(delete(CVDocument).where(CVDocument.id == doc_id))
+        await async_session.commit()
+        # Ensure cleanup
+        assert (await async_session.get(JobApplication, app_id)) is None
+
+def generate_mock_questions():
+    questions = []
+    cats = [
+        "backend_fundamentals", "backend_fundamentals",
+        "cv_project_experience", "cv_project_experience",
+        "database", "database",
+        "api_web_design", "api_web_design",
+        "debugging_problem_solving", "behavioral_teamwork"
+    ]
+    diffs = ["easy"] * 4 + ["medium"] * 4 + ["hard"] * 2
+    for i in range(10):
+        q = InterviewQuestionGenerated(
+            question_text=f"Valid question text {i}",
+            category=QuestionCategory(cats[i]),
+            difficulty=QuestionDifficulty(diffs[i]),
+            purpose="Valid purpose text for this question",
+            expected_key_points=["Key point 1"],
+            source=QuestionSource.general_backend,
+            source_evidence="evidence" if cats[i] == "cv_project_experience" else None
+        )
+        questions.append(q)
+    return InterviewQuestionSet(questions=questions)
+
+@pytest.mark.asyncio
+async def test_create_session_no_consent(client, sample_application_ready):
+    res = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": False})
+    assert res.status_code == 422
+
+@pytest.mark.asyncio
+async def test_create_session_success(client, sample_application_ready, mock_ai_provider):
+    mock_ai_provider.mock_questions_result = InterviewQuestionsResult(generate_mock_questions(), None, None, 10, 10)
+    res = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "ready"
+    assert len(data["questions"]) == 10
+    
+    # Check idempotency
+    res2 = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res2.status_code == 200
+    assert mock_ai_provider.call_count == 1 # Only called once!
+
+@pytest.mark.asyncio
+async def test_create_session_bad_distribution(client, sample_application_ready, mock_ai_provider):
+    qs = generate_mock_questions()
+    qs.questions[0].category = "database" # breaks distribution
+    mock_ai_provider.mock_questions_result = InterviewQuestionsResult(qs, None, None, 10, 10)
+    res = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res.status_code == 200
+    assert res.json()["status"] == "generation_failed"
+    assert res.json()["error_code"] == "INTERNAL_ANALYSIS_ERROR"
+
+@pytest.mark.asyncio
+async def test_create_session_provider_error(client, sample_application_ready, mock_ai_provider):
+    mock_ai_provider.mock_questions_result = InterviewQuestionsResult(None, "RATE_LIMITED", "Wait", 10, 10)
+    res = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res.status_code == 200
+    assert res.json()["status"] == "generation_failed"
+    assert res.json()["error_code"] == "RATE_LIMITED"
+    
+    # Retry
+    mock_ai_provider.mock_questions_result = InterviewQuestionsResult(generate_mock_questions(), None, None, 10, 10)
+    res2 = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res2.status_code == 200
+    assert res2.json()["status"] == "ready"
+
+@pytest.mark.asyncio
+async def test_create_session_concurrent(client, sample_application_ready, mock_ai_provider):
+    provider_entered = asyncio.Event()
+    provider_continue = asyncio.Event()
+
+    async def blocking_generate(input_data):
+        mock_ai_provider.call_count += 1
+        provider_entered.set()
+        await provider_continue.wait()
+        return InterviewQuestionsResult(generate_mock_questions(), None, None, 10, 10)
+
+    mock_ai_provider.generate_interview_questions = blocking_generate
+
+    t1 = asyncio.create_task(
+        client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    )
+
+    await provider_entered.wait()
+    res2 = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    assert res2.status_code == 409
+    
+    provider_continue.set()
+    res1 = await t1
+    assert res1.status_code == 200
+
+@pytest.mark.asyncio
+async def test_create_session_commit_fail(client, sample_application_ready, monkeypatch):
+    import sqlalchemy.ext.asyncio.session
+    original_commit = sqlalchemy.ext.asyncio.session.AsyncSession.commit
+    commit_count = 0
+    
+    async def fully_failing_commit(self):
+        nonlocal commit_count
+        commit_count += 1
+        if commit_count >= 2:
+            raise Exception("Total commit fail")
+        await original_commit(self)
+        
+    monkeypatch.setattr(sqlalchemy.ext.asyncio.session.AsyncSession, "commit", fully_failing_commit)
+    
+    res = await client.post(f"/api/v1/job-applications/{sample_application_ready}/interview-sessions", json={"consent_to_external_ai": True})
+    monkeypatch.undo()
+    assert res.status_code == 500
+    
+    

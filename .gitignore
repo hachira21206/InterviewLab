@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+backend/.venv/
+.pytest_cache/
+coverage/
+
+# Environment files
+.env
+.env*.local
+.env.production
+.env.staging
+backend/.env
+frontend/.env.local
+!*.example
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Caches, scratch and output
+.cache/
+.scratch/
+.agents/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Storage & Uploads
+data/*
+!data/uploads/
+data/uploads/*
+!data/uploads/cv/
+data/uploads/cv/*
+!data/uploads/cv/.gitkeep
