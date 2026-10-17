@@ -57,7 +57,7 @@ export function isCandidateAnalysis(data: unknown): data is CandidateAnalysis {
   if (!isArrayOf(d.strengths, x => typeof x.title === 'string' && typeof x.evidence === 'string')) return false;
   if (!isArrayOf(d.gaps, x => typeof x.title === 'string' && typeof x.reason === 'string')) return false;
   if (!isArrayOf(d.matched_requirements, x => typeof x.requirement === 'string' && typeof x.evidence === 'string')) return false;
-  if (!isArrayOf(d.missing_requirements, x => typeof x.requirement === 'string' && typeof x.evidence === 'string')) return false;
+  if (!Array.isArray(d.missing_requirements) || !d.missing_requirements.every(x => typeof x === 'string' || (x && typeof x === 'object' && typeof (x as Record<string, unknown>).requirement === 'string'))) return false;
   if (!isArrayOf(d.recommended_interview_topics, x => typeof x.topic === 'string' && typeof x.reason === 'string' && ['high', 'medium', 'low'].includes(x.priority as string))) return false;
 
   return true;
@@ -251,27 +251,52 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
 
           <div className="grid gap-6 md:grid-cols-2">
             <section>
-            <h3 className="mb-3 font-semibold text-emerald-800">Điểm mạnh</h3>
-            <ul className="space-y-2">
-              {analysis.strengths?.map((s, idx) => (
-                <li key={idx} className="rounded-lg border-l-2 border-emerald-500 bg-emerald-50/70 p-3 text-sm leading-6 text-emerald-950">
-                  <strong className="mb-1 block">{s.title}</strong>
-                  {s.evidence}
-                </li>
-              ))}
-            </ul>
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="font-semibold text-emerald-800">Điểm mạnh</h3>
+                <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
+                  {analysis.strengths?.length || 0}
+                </span>
+              </div>
+              {analysis.strengths && analysis.strengths.length > 0 ? (
+                <ul className="space-y-2">
+                  {analysis.strengths.map((s, idx) => (
+                    <li key={idx} className="rounded-lg border-l-2 border-emerald-500 bg-emerald-50/70 p-3 text-sm leading-6 text-emerald-950">
+                      <strong className="mb-1 block">{s.title}</strong>
+                      {s.evidence}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="rounded-lg border border-dashed border-emerald-200 bg-emerald-50/40 p-4 text-xs leading-5 text-emerald-800">
+                  Chưa ghi nhận điểm mạnh nổi bật trong hồ sơ.
+                </div>
+              )}
             </section>
 
             <section>
-            <h3 className="mb-3 font-semibold text-amber-800">Khoảng trống kiến thức (Gaps)</h3>
-            <ul className="space-y-2">
-              {analysis.gaps?.map((g, idx) => (
-                <li key={idx} className="rounded-lg border-l-2 border-amber-500 bg-amber-50/70 p-3 text-sm leading-6 text-amber-950">
-                  <strong className="mb-1 block">{g.title}</strong>
-                  {g.reason}
-                </li>
-              ))}
-            </ul>
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="font-semibold text-amber-800">Khoảng trống kiến thức (Gaps)</h3>
+                <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-800">
+                  {analysis.gaps?.length || 0}
+                </span>
+              </div>
+              {analysis.gaps && analysis.gaps.length > 0 ? (
+                <ul className="space-y-2">
+                  {analysis.gaps.map((g, idx) => (
+                    <li key={idx} className="rounded-lg border-l-2 border-amber-500 bg-amber-50/70 p-3 text-sm leading-6 text-amber-950">
+                      <strong className="mb-1 block">{g.title}</strong>
+                      {g.reason}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50/60 p-4 text-xs leading-5 text-amber-900">
+                  <p className="font-semibold">Chưa ghi nhận khoảng trống kiến thức lớn</p>
+                  <p className="mt-1 text-slate-600">
+                    Ứng viên đã đáp ứng tốt các tiêu chí cơ bản của vị trí. Bạn có thể dán thêm Job Description (JD) chi tiết của nhà tuyển dụng để AI đối chiếu các yêu cầu công nghệ chuyên sâu hơn.
+                  </p>
+                </div>
+              )}
             </section>
           </div>
 

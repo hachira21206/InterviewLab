@@ -195,21 +195,68 @@ class GeminiAnalysisProvider(AIAnalysisProvider):
     in the URL, which also keeps it out of proxy/access logs.
     """
 
-    async def _call_api(self, input_data: AnalysisInput) -> Tuple[Optional[dict], Optional[str], Optional[str], Optional[int], Optional[int]]:
-        payload = {
-            "systemInstruction": {"parts": [{"text": input_data.system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": input_data.user_prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": getattr(settings, "AI_MAX_COMPLETION_TOKENS", 8192),
-                "responseMimeType": "application/json",
-                "responseJsonSchema": prepare_strict_json_schema(input_data.schema),
-            },
+    # Gemini can accept a small responseJsonSchema while rejecting a deeply
+    # nested one with HTTP 400. Remember that capability decision for the
+    # lifetime of the worker so later calls do not waste a request on a schema
+    # shape that this model has already rejected.
+    _native_schema_available = True
+
+    @staticmethod
+    def _log_validation_failure(result_name: str, exc: ValidationError) -> None:
+        safe_errors = [
+            {
+                "loc": ".".join(str(part) for part in error.get("loc", ())),
+                "type": error.get("type", "unknown"),
+            }
+            for error in exc.errors(
+                include_url=False,
+                include_context=False,
+                include_input=False,
+            )
+        ]
+        logger.warning(
+            "Gemini %s failed Pydantic validation: %s",
+            result_name,
+            safe_errors,
+        )
+
+    @staticmethod
+    def _build_payload(input_data: AnalysisInput, *, use_native_schema: bool) -> dict:
+        system_prompt = input_data.system_prompt
+        generation_config: Dict[str, Any] = {
+            "temperature": 0.1,
+            "maxOutputTokens": getattr(settings, "AI_MAX_COMPLETION_TOKENS", 8192),
+            "responseMimeType": "application/json",
         }
+
+        if use_native_schema:
+            generation_config["responseJsonSchema"] = prepare_strict_json_schema(input_data.schema)
+        else:
+            schema_json = json.dumps(
+                input_data.schema,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "BẮT BUỘC chỉ trả về đúng một đối tượng JSON, không Markdown, "
+                "không giải thích ngoài JSON. Kết quả phải tuân thủ JSON Schema "
+                f"sau và sẽ được backend kiểm tra lại nghiêm ngặt:\n{schema_json}"
+            )
+
+        return {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": input_data.user_prompt}]}],
+            "generationConfig": generation_config,
+        }
+
+    async def _call_api(self, input_data: AnalysisInput) -> Tuple[Optional[dict], Optional[str], Optional[str], Optional[int], Optional[int]]:
         base_url = settings.GEMINI_BASE_URL.rstrip("/")
         model = settings.GEMINI_MODEL.strip()
         timeout = getattr(settings, "AI_REQUEST_TIMEOUT_SECONDS", 60.0)
         headers = {"x-goog-api-key": settings.GEMINI_API_KEY or "", "Content-Type": "application/json"}
+        use_native_schema = type(self)._native_schema_available
+        payload = self._build_payload(input_data, use_native_schema=use_native_schema)
 
         try:
             async with httpx.AsyncClient() as client:
@@ -219,13 +266,28 @@ class GeminiAnalysisProvider(AIAnalysisProvider):
                     json=payload,
                     timeout=timeout,
                 )
+                if res.status_code == 400 and use_native_schema:
+                    logger.warning(
+                        "Gemini rejected the native response schema; retrying with JSON mode."
+                    )
+                    type(self)._native_schema_available = False
+                    fallback_payload = self._build_payload(
+                        input_data,
+                        use_native_schema=False,
+                    )
+                    res = await client.post(
+                        f"{base_url}/models/{model}:generateContent",
+                        headers=headers,
+                        json=fallback_payload,
+                        timeout=timeout,
+                    )
                 if res.status_code in (401, 403):
                     return None, "CONFIGURATION_ERROR", "Lỗi cấu hình xác thực AI.", None, None
                 if res.status_code == 429:
                     return None, "RATE_LIMITED", "Vượt quá giới hạn request.", None, None
                 if res.status_code == 400:
                     logger.warning("Gemini API rejected the request with HTTP 400.")
-                    return None, "INVALID_PROVIDER_RESPONSE", "Lỗi định dạng yêu cầu hoặc vượt quá giới hạn token từ AI.", None, None
+                    return None, "INVALID_PROVIDER_RESPONSE", "Gemini từ chối định dạng yêu cầu.", None, None
                 if res.status_code >= 500:
                     return None, "PROVIDER_UNAVAILABLE", "AI Provider hiện không khả dụng.", None, None
                 res.raise_for_status()
@@ -263,7 +325,8 @@ class GeminiAnalysisProvider(AIAnalysisProvider):
             return AnalysisResult(None, code, message, input_tokens, output_tokens)
         try:
             return AnalysisResult(CandidateAnalysis(**data), None, None, input_tokens, output_tokens)
-        except ValidationError:
+        except ValidationError as exc:
+            self._log_validation_failure("candidate analysis", exc)
             return AnalysisResult(None, "INVALID_PROVIDER_RESPONSE", "Kết quả JSON sai Schema.", input_tokens, output_tokens)
 
     async def generate_interview_questions(self, input_data: AnalysisInput) -> InterviewQuestionsResult:
@@ -272,7 +335,8 @@ class GeminiAnalysisProvider(AIAnalysisProvider):
             return InterviewQuestionsResult(None, code, message, input_tokens, output_tokens)
         try:
             return InterviewQuestionsResult(InterviewQuestionSet(**data), None, None, input_tokens, output_tokens)
-        except ValidationError:
+        except ValidationError as exc:
+            self._log_validation_failure("interview questions", exc)
             return InterviewQuestionsResult(None, "INVALID_PROVIDER_RESPONSE", "Kết quả JSON sai Schema.", input_tokens, output_tokens)
 
     async def evaluate_interview(self, input_data: AnalysisInput) -> InterviewEvaluationResult:
@@ -281,7 +345,8 @@ class GeminiAnalysisProvider(AIAnalysisProvider):
             return InterviewEvaluationResult(None, code, message, input_tokens, output_tokens)
         try:
             return InterviewEvaluationResult(InterviewEvaluationAISet(**data), None, None, input_tokens, output_tokens)
-        except ValidationError:
+        except ValidationError as exc:
+            self._log_validation_failure("interview evaluation", exc)
             return InterviewEvaluationResult(None, "INVALID_PROVIDER_RESPONSE", "Kết quả JSON sai Schema.", input_tokens, output_tokens)
 
 class FakeAnalysisProvider(AIAnalysisProvider):
