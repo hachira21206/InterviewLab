@@ -1,14 +1,18 @@
 'use client';
+import Link from 'next/link';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   SessionStatus,
+  PracticeMode,
+  QuestionCategory,
   InterviewHistoryItem,
   InterviewHistoryListResponse,
   isInterviewHistoryListResponse,
   isInterviewSessionResponse,
 } from '../types/interview';
+import PracticeModeSelector from './PracticeModeSelector';
 
-export type { SessionStatus, InterviewHistoryItem, InterviewHistoryListResponse };
+export type { SessionStatus, PracticeMode, QuestionCategory, InterviewHistoryItem, InterviewHistoryListResponse };
 export { isInterviewHistoryItem, isInterviewHistoryListResponse, isInterviewSessionResponse } from '../types/interview';
 
 function getStatusBadge(status: SessionStatus) {
@@ -48,6 +52,7 @@ interface Props {
   selectedSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onAttemptCreated: (sessionId: string) => void;
+  viewMode?: 'practice' | 'results' | 'setup';
 }
 
 export default function InterviewHistory({
@@ -55,11 +60,15 @@ export default function InterviewHistory({
   selectedSessionId,
   onSelectSession,
   onAttemptCreated,
+  viewMode = 'practice',
 }: Props) {
   const [history, setHistory] = useState<InterviewHistoryItem[]>([]);
+  const [historyReady, setHistoryReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isCreatingAttempt, setIsCreatingAttempt] = useState(false);
   const [consent, setConsent] = useState(false);
+  const [practiceMode, setPracticeMode] = useState<PracticeMode>('full_mock');
+  const [focusCategory, setFocusCategory] = useState<QuestionCategory>('database');
   const [error, setError] = useState<string | null>(null);
   const [schemaError, setSchemaError] = useState<string | null>(null);
 
@@ -83,6 +92,7 @@ export default function InterviewHistory({
       const contentType = res.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {
         if (isMountedRef.current) {
+          setHistoryReady(false);
           setSchemaError('Dữ liệu lịch sử không hợp lệ (không phải JSON).');
         }
         return false;
@@ -92,16 +102,21 @@ export default function InterviewHistory({
       if (!isMountedRef.current) return false;
 
       if (!res.ok) {
+        setHistoryReady(false);
         setError('Không thể tải lịch sử phỏng vấn.');
         return false;
       }
 
-      if (isInterviewHistoryListResponse(data)) {
+      if (isInterviewHistoryListResponse(data, applicationId)) {
         setHistory(data.items);
+        setHistoryReady(true);
         setSchemaError(null);
+        setError(null);
         return true;
       } else {
-        setSchemaError('Phản hồi lịch sử không đúng định dạng chuẩn.');
+        setHistory([]);
+        setHistoryReady(false);
+        setSchemaError('Phản hồi lịch sử không đúng định dạng chuẩn hoặc không khớp hồ sơ ứng tuyển.');
         return false;
       }
     } catch (err: unknown) {
@@ -110,6 +125,7 @@ export default function InterviewHistory({
       }
       if (isMountedRef.current) {
         setError(err instanceof Error ? err.message : 'Lỗi khi tải lịch sử.');
+        setHistoryReady(false);
       }
       return false;
     } finally {
@@ -148,9 +164,12 @@ export default function InterviewHistory({
   const hasActiveAttempt = history.some((item) =>
     ['generating', 'generation_failed', 'ready', 'in_progress'].includes(item.status)
   );
+  const visibleHistory = viewMode === 'results'
+    ? history.filter((item) => item.status === 'completed')
+    : history;
 
   const handleCreateAttempt = async () => {
-    if (isCreatingAttempt || !consent || hasActiveAttempt) return;
+    if (loading || !historyReady || isCreatingAttempt || !consent || hasActiveAttempt) return;
 
     if (createAttemptAbortRef.current) {
       createAttemptAbortRef.current.abort();
@@ -162,6 +181,18 @@ export default function InterviewHistory({
     setError(null);
     setSchemaError(null);
 
+    const requestPayload: {
+      consent_to_external_ai: boolean;
+      practice_mode: PracticeMode;
+      focus_category?: QuestionCategory;
+    } = {
+      consent_to_external_ai: consent,
+      practice_mode: practiceMode,
+    };
+    if (practiceMode === 'focus_category') {
+      requestPayload.focus_category = focusCategory;
+    }
+
     try {
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
       const res = await fetch(
@@ -169,7 +200,7 @@ export default function InterviewHistory({
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ consent_to_external_ai: consent }),
+          body: JSON.stringify(requestPayload),
           signal: abortController.signal,
         }
       );
@@ -228,13 +259,17 @@ export default function InterviewHistory({
   };
 
   return (
-    <section className="border-t border-slate-200 pt-8" aria-labelledby="interview-history-title">
+    <section className={viewMode === 'setup' ? '' : 'border-t border-slate-200 pt-8'} aria-labelledby={viewMode === 'setup' ? 'new-attempt-title' : 'interview-history-title'}>
+      {viewMode !== 'setup' && (
+      <>
       <div className="mb-5 flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">Các lần luyện</p>
-          <h2 id="interview-history-title" className="mt-1 text-xl font-bold tracking-tight text-slate-950">Lịch sử luyện phỏng vấn</h2>
+          <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">{viewMode === 'results' ? 'Buổi đã hoàn thành' : 'Các lần luyện'}</p>
+          <h2 id="interview-history-title" className="mt-1 text-xl font-bold tracking-tight text-slate-950">{viewMode === 'results' ? 'Chọn buổi để xem kết quả' : 'Lịch sử luyện phỏng vấn'}</h2>
           <p className="mt-1 text-sm leading-6 text-slate-600">
-            Xem lại các lần luyện trước hoặc bắt đầu một lần luyện mới độc lập.
+            {viewMode === 'results'
+              ? 'Mỗi buổi có bản ghi câu trả lời và đánh giá riêng. Chọn buổi bạn muốn xem lại.'
+              : 'Xem lại các lần luyện hoặc bắt đầu một buổi mới sau khi hoàn thành buổi hiện tại.'}
           </p>
         </div>
         <button
@@ -259,13 +294,15 @@ export default function InterviewHistory({
       )}
 
       {/* Attempts List */}
-      {history.length === 0 ? (
+      {visibleHistory.length === 0 ? (
         <div className="mb-6 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-7 text-center text-sm leading-6 text-slate-500">
-          Chưa có lần luyện phỏng vấn nào. Bạn có thể bắt đầu lần luyện đầu tiên bên dưới.
+          {viewMode === 'results'
+            ? loading ? 'Đang tải các buổi đã hoàn thành...' : 'Chưa có buổi phỏng vấn hoàn thành. Hãy hoàn thành một buổi để xem kết quả tại đây.'
+            : 'Chưa có lần luyện nào. Bạn có thể bắt đầu lần luyện đầu tiên bên dưới.'}
         </div>
       ) : (
         <div className="mb-6 space-y-2">
-          {history.map((item) => {
+          {visibleHistory.map((item) => {
             const isSelected = selectedSessionId === item.id;
             const isEvaluated = item.total_score !== null;
             const isCompleted = item.status === 'completed';
@@ -274,17 +311,17 @@ export default function InterviewHistory({
             return (
               <div
                 key={item.id}
-                className={`rounded-lg border-l-4 p-4 transition-colors ${
+                className={`rounded-xl border p-4 transition-all duration-150 ${
                   isSelected
-                    ? 'border-blue-600 bg-blue-50/60'
-                    : 'border-slate-200 bg-slate-50/60 hover:border-slate-400 hover:bg-white'
+                    ? 'border-blue-500 bg-blue-50/70 shadow-xs ring-2 ring-blue-500/20'
+                    : 'border-slate-200/90 bg-white hover:border-slate-300 hover:bg-slate-50/60'
                 }`}
               >
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-slate-900">
-                        Lần luyện số {item.attempt_number}
+                        {item.mode_display_title || `Lần ${item.attempt_number} · Phỏng vấn tổng hợp`}
                       </span>
                       {getStatusBadge(item.status)}
                     </div>
@@ -321,13 +358,15 @@ export default function InterviewHistory({
                   <div className="flex items-center gap-2 self-end sm:self-center">
                     <button
                       onClick={() => onSelectSession(item.id)}
-                      className={`rounded-md px-3 py-1.5 text-xs font-medium ${
+                      className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold shadow-2xs transition-colors ${
                         isSelected
-                          ? 'bg-blue-700 text-white'
-                          : 'bg-white text-blue-700 hover:bg-blue-50'
+                          ? 'bg-blue-700 text-white hover:bg-blue-800'
+                          : 'border border-slate-200 bg-white text-blue-700 hover:bg-blue-50'
                       }`}
                     >
-                      {isActive ? 'Tiếp tục luyện' : isEvaluated ? 'Xem báo cáo' : 'Xem câu hỏi'}
+                      {viewMode === 'results'
+                        ? 'Xem bài đã nộp'
+                        : isActive ? 'Tiếp tục luyện' : 'Xem tóm tắt'}
                     </button>
                   </div>
                 </div>
@@ -336,42 +375,92 @@ export default function InterviewHistory({
           })}
         </div>
       )}
+      </>
+      )}
 
       {/* Start New Attempt Section */}
-      <div className="border-l-4 border-blue-600 bg-blue-50/70 p-5">
-        <h3 className="mb-1 text-sm font-bold text-blue-950">
-          Luyện phỏng vấn lần mới
-        </h3>
-        <p className="mb-3 text-xs leading-5 text-blue-800">
+      {(viewMode === 'practice' || viewMode === 'setup') && <div className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xs sm:p-8">
+        <div className="flex items-center gap-3">
+          <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-xs shadow-blue-500/20">
+            <span className="text-xl">🚀</span>
+          </div>
+          <div>
+            <p className="text-[11px] font-bold tracking-[0.14em] text-blue-700 uppercase">Lần luyện tiếp theo</p>
+            <h3 id="new-attempt-title" className="text-xl font-bold tracking-tight text-slate-950">Tạo bài luyện phỏng vấn</h3>
+          </div>
+        </div>
+
+        <p className="mt-3 text-sm leading-6 text-slate-600">
           {hasActiveAttempt
             ? 'Bạn đang có một lần luyện chưa hoàn tất. Vui lòng hoàn thành lần luyện hiện tại trước khi bắt đầu lần luyện mới.'
-            : 'Bạn đã hoàn thành lượt luyện hiện tại. Bắt đầu một lượt luyện mới với 10 câu hỏi độc lập được sinh riêng.'}
+            : history.length === 0
+            ? 'Chọn một chế độ để tạo bộ 10 câu hỏi đầu tiên cho hồ sơ này.'
+            : 'Bắt đầu một lượt luyện mới với 10 câu hỏi độc lập được sinh riêng.'}
         </p>
 
-        {!hasActiveAttempt && (
-          <div className="space-y-3">
-            <label className="flex cursor-pointer items-start gap-2 text-xs leading-5 text-slate-700">
-              <input
-                type="checkbox"
-                checked={consent}
-                onChange={(e) => setConsent(e.target.checked)}
-                className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-200"
-              />
-              <span>
+        {viewMode === 'setup' && schemaError && <div role="alert" className="mt-4 rounded-lg border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-800">{schemaError}</div>}
+        {viewMode === 'setup' && error && <div role="alert" className="mt-4 rounded-lg border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-800">{error}</div>}
+
+        {loading ? (
+          <p className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-600" role="status">Đang kiểm tra lượt luyện hiện tại...</p>
+        ) : !historyReady ? (
+          <div className="mt-5 rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
+            <p>Chưa kiểm tra được lượt luyện hiện tại. Hãy tải lại trước khi tạo bài mới.</p>
+            <button type="button" onClick={handleManualRefresh} className="mt-3 rounded-lg bg-blue-700 px-4 py-2.5 font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200">Thử tải lại</button>
+          </div>
+        ) : hasActiveAttempt ? (
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/80 p-4 text-sm text-amber-900">
+            <p>Bạn đang có một lượt luyện chưa hoàn tất. Hãy tiếp tục lượt đó trước khi tạo bài mới.</p>
+            <Link href="/interview" className="mt-3 inline-flex rounded-lg bg-blue-700 px-4 py-2.5 font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200">
+              Tiếp tục buổi luyện
+            </Link>
+          </div>
+        ) : (
+          <div className="mt-6 border-t border-slate-100 pt-6 space-y-6">
+            <PracticeModeSelector
+              applicationId={applicationId}
+              practiceMode={practiceMode}
+              onPracticeModeChange={setPracticeMode}
+              focusCategory={focusCategory}
+              onFocusCategoryChange={setFocusCategory}
+              disabled={isCreatingAttempt}
+            />
+
+            <label className="flex cursor-pointer select-none items-start gap-3 rounded-xl border border-slate-200/80 bg-slate-50/60 p-3.5 transition-colors hover:border-slate-300 hover:bg-slate-50 group">
+              <div className="flex h-5 items-center">
+                <input
+                  type="checkbox"
+                  checked={consent}
+                  onChange={(e) => setConsent(e.target.checked)}
+                  disabled={isCreatingAttempt}
+                  className="size-4 rounded border border-slate-300 bg-white text-blue-700 focus:ring-4 focus:ring-blue-200 disabled:opacity-50"
+                />
+              </div>
+              <span className="text-xs sm:text-sm leading-5 sm:leading-6 text-slate-700 group-hover:text-slate-950 font-medium">
                 Tôi đồng ý gửi dữ liệu hồ sơ để AI sinh bộ câu hỏi mới cho lần luyện này.
               </span>
             </label>
 
-            <button
-              onClick={handleCreateAttempt}
-              disabled={isCreatingAttempt || !consent}
-              className="rounded-lg bg-blue-700 px-5 py-2.5 text-xs font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-300"
-            >
-              {isCreatingAttempt ? 'Đang tạo lần luyện mới...' : 'Luyện phỏng vấn lần mới'}
-            </button>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-1">
+              <button
+                onClick={handleCreateAttempt}
+                disabled={loading || !historyReady || isCreatingAttempt || !consent}
+                className="btn-primary-glow inline-flex w-full items-center justify-center gap-2 rounded-xl bg-blue-700 px-7 py-3 text-sm font-bold text-white shadow-sm transition-all hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-300 sm:w-auto"
+              >
+                {isCreatingAttempt ? (
+                  <span className="spinner-inline" aria-hidden="true" />
+                ) : (
+                  <span className="text-base" aria-hidden="true">🚀</span>
+                )}
+                {isCreatingAttempt ? 'Đang tạo bộ câu hỏi...' : 'Tạo bộ câu hỏi'}
+              </button>
+              <span className="text-[11px] text-slate-400 text-center sm:text-right font-medium">
+                10 câu hỏi độc lập · Thời gian tạo ~5-15s
+              </span>
+            </div>
           </div>
         )}
-      </div>
+      </div>}
     </section>
   );
 }

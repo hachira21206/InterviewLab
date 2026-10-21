@@ -29,6 +29,7 @@ frontend/out/
 # OS
 .DS_Store
 Thumbs.db
+~$*
 
 # Storage & Uploads
 data/*

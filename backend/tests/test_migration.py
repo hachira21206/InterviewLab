@@ -81,7 +81,14 @@ def test_migration_downgrade_blocked_when_multiple_attempts(alembic_test_db):
         capture_output=True, text=True, check=True
     )
 
-    # Attempt downgrade -1 must FAIL safely without data loss!
+    # Downgrade to feae8be1dc16 first so we test feae8be1dc16 downgrade guard
+    res_to_feae = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "downgrade", "feae8be1dc16"],
+        env=env, cwd=os.path.join(os.path.dirname(__file__), "../../"), capture_output=True, text=True
+    )
+    assert res_to_feae.returncode == 0
+
+    # Attempt downgrade -1 from feae8be1dc16 must FAIL safely without data loss!
     downgrade_res = subprocess.run(
         [sys.executable, "-m", "alembic", "-c", "backend/alembic.ini", "downgrade", "-1"],
         env=env, cwd=os.path.join(os.path.dirname(__file__), "../../"), capture_output=True, text=True

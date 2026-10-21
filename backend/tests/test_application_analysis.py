@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 import pytest_asyncio
 import asyncio
 import uuid
@@ -15,6 +15,7 @@ from app.core.config import settings
 def mock_ai_provider(monkeypatch):
     import app.services.application_analysis
     fake = FakeAnalysisProvider()
+    monkeypatch.setattr(settings, "AI_PROVIDER", "groq")
     monkeypatch.setattr(settings, "GROQ_API_KEY", "fake_key")
     def fake_get_provider():
         from app.core.exceptions import ProviderConfigurationError

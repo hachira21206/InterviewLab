@@ -1,16 +1,17 @@
 'use client';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useState, useEffect, useRef } from 'react';
 import InterviewEvaluation from './InterviewEvaluation';
-import InterviewHistory from './InterviewHistory';
-import InterviewProgressDashboard from './InterviewProgressDashboard';
 import QuestionVoiceTimerBar from './QuestionVoiceTimerBar';
 import QuestionCoachHint from './QuestionCoachHint';
 import {
   SessionStatus,
+  PracticeMode,
   QuestionCategory,
   QuestionDifficulty,
   InterviewSessionResponse,
+  isInterviewHistoryListResponse,
   isInterviewSessionResponse,
 } from '../types/interview';
 
@@ -91,16 +92,21 @@ function isInterviewProgressResponse(data: unknown): data is InterviewProgressRe
 interface Props {
   applicationId: string;
   analysisCompleted: boolean;
-  mode?: 'full' | 'interview' | 'result';
+  mode?: 'interview' | 'result' | 'report';
+  selectedSessionId?: string | null;
 }
 
-export default function InterviewQuestions({ applicationId, analysisCompleted, mode = 'full' }: Props) {
+export default function InterviewQuestions({ applicationId, analysisCompleted, mode = 'interview', selectedSessionId = null }: Props) {
+  const router = useRouter();
   const [session, setSession] = useState<InterviewSessionResponse | null>(null);
   const [progress, setProgress] = useState<InterviewProgressResponse | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
+  const [finalAction, setFinalAction] = useState<'answer' | 'skip' | null>(null);
   const [answerText, setAnswerText] = useState('');
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -112,7 +118,25 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
     const fetchSessionAndProgress = async () => {
       try {
         const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
-        const res = await fetch(`${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions/current`, {
+        let targetSessionId = selectedSessionId;
+        if (!targetSessionId && mode !== 'interview') {
+          const historyRes = await fetch(`${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions`, {
+            signal: abortController.signal,
+          });
+          if (!historyRes.ok || !historyRes.headers.get('content-type')?.includes('application/json')) {
+            throw new Error('Không thể tải danh sách bài đã nộp.');
+          }
+          const historyData = await historyRes.json() as unknown;
+          if (!isInterviewHistoryListResponse(historyData, applicationId)) {
+            throw new Error('Dữ liệu lịch sử không hợp lệ.');
+          }
+          targetSessionId = historyData.items.find((item) => item.status === 'completed')?.id ?? null;
+          if (!targetSessionId) return;
+        }
+        const sessionPath = targetSessionId
+          ? `${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions/${targetSessionId}`
+          : `${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions/current`;
+        const res = await fetch(sessionPath, {
           signal: abortController.signal
         });
         
@@ -125,7 +149,7 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
         
         const data = await res.json() as unknown;
         if (res.ok) {
-          if (isInterviewSessionResponse(data)) {
+          if (isInterviewSessionResponse(data, applicationId)) {
             setSession(data);
             if (data.status === 'generation_failed') {
                setError(data.error_message || 'Tạo câu hỏi thất bại.');
@@ -134,49 +158,32 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
               const progRes = await fetch(`${backendUrl}/api/v1/interview-sessions/${data.id}/progress`, {
                 signal: abortController.signal
               });
-              if (progRes.ok) {
-                const progData = await progRes.json() as unknown;
-                if (isInterviewProgressResponse(progData)) {
-                  setProgress(progData);
-                }
+              if (!progRes.ok || !progRes.headers.get('content-type')?.includes('application/json')) {
+                throw new Error('Không thể tải tiến độ buổi luyện.');
               }
+              const progData = await progRes.json() as unknown;
+              if (!isInterviewProgressResponse(progData) || progData.session_id !== data.id) {
+                throw new Error('Dữ liệu tiến độ không hợp lệ.');
+              }
+              setProgress(progData);
             }
+          } else {
+            throw new Error('Dữ liệu buổi luyện không hợp lệ.');
           }
+        } else {
+          throw new Error('Không thể tải buổi luyện.');
         }
       } catch (err: unknown) {
-        if (err instanceof Error && err.name !== 'AbortError') {
-          // ignore
+        if (!abortController.signal.aborted) {
+          setLoadError(err instanceof Error ? err.message : 'Không thể tải buổi luyện.');
         }
+      } finally {
+        if (!abortController.signal.aborted) setInitialLoading(false);
       }
     };
     fetchSessionAndProgress();
     return () => abortController.abort();
-  }, [applicationId, analysisCompleted]);
-
-  const loadSessionById = async (sessionId: string) => {
-    try {
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
-      const res = await fetch(`${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions/${sessionId}`);
-      if (!res.ok) return;
-      const data = (await res.json()) as unknown;
-      if (isInterviewSessionResponse(data)) {
-        setSession(data);
-        if (data.status === 'in_progress' || data.status === 'completed') {
-          const progRes = await fetch(`${backendUrl}/api/v1/interview-sessions/${data.id}/progress`);
-          if (progRes.ok) {
-            const progData = (await progRes.json()) as unknown;
-            if (isInterviewProgressResponse(progData)) {
-              setProgress(progData);
-            }
-          }
-        } else {
-          setProgress(null);
-        }
-      }
-    } catch {
-      // ignore
-    }
-  };
+  }, [applicationId, analysisCompleted, mode, selectedSessionId]);
 
   useEffect(() => {
     return () => {
@@ -184,7 +191,7 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
     };
   }, []);
 
-  const handleGenerate = async () => {
+  const handleRetryGeneration = async () => {
     if (loading || session?.status === 'generating') return;
     setLoading(true);
     setError(null);
@@ -192,13 +199,18 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
     if (abortControllerRef.current) abortControllerRef.current.abort();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
+
+    const requestPayload: { consent_to_external_ai: boolean; practice_mode: PracticeMode } = {
+      consent_to_external_ai: consent,
+      practice_mode: 'full_mock',
+    };
     
     try {
       const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
       const res = await fetch(`${backendUrl}/api/v1/job-applications/${applicationId}/interview-sessions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ consent_to_external_ai: consent }),
+        body: JSON.stringify(requestPayload),
         signal: abortController.signal
       });
       
@@ -216,7 +228,7 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
             setError('Lỗi hệ thống.');
         }
       } else {
-        if (isInterviewSessionResponse(data)) {
+        if (isInterviewSessionResponse(data, applicationId)) {
           setSession(data);
           if (data.status === 'generation_failed') {
             setError(data.error_message || data.error_code || 'Tạo thất bại.');
@@ -330,6 +342,10 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
         if (isInterviewProgressResponse(data)) {
           setProgress(data);
           setAnswerText('');
+          setFinalAction(null);
+          if (data.status === 'completed') {
+            router.push(`/result?sessionId=${data.session_id}`);
+          }
         } else {
           setError('Dữ liệu trả về không hợp lệ.');
         }
@@ -347,38 +363,67 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
 
   if (!analysisCompleted) return null;
 
+  if (initialLoading) {
+    return <div className="rounded-xl bg-slate-50 p-6 text-sm text-slate-600" role="status">Đang tải buổi luyện...</div>;
+  }
+
+  if (loadError) {
+    return <div role="alert" className="rounded-xl border-l-4 border-red-500 bg-red-50 p-5 text-sm text-red-800">{loadError}</div>;
+  }
+
+  const isFinalQuestion = progress?.status === 'in_progress' &&
+    progress.completed_count === progress.total_questions - 1;
+
   return (
-    <section className="mt-10 space-y-10 border-t border-slate-200 pt-9" aria-labelledby="interview-workspace-title">
+    <section className="space-y-8" aria-labelledby="interview-workspace-title">
       <div>
-        <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">04 · Luyện phỏng vấn</p>
-        <h2 id="interview-workspace-title" className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Không gian phỏng vấn</h2>
-        <p className="mt-2 text-sm leading-6 text-slate-600">Tạo bộ câu hỏi theo hồ sơ, trả lời lần lượt và xem lại toàn bộ nội dung sau khi hoàn thành.</p>
+        <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">{mode === 'report' ? 'Báo cáo đánh giá' : mode === 'result' ? 'Bài đã nộp' : 'Buổi luyện hiện tại'}</p>
+        <h2 id="interview-workspace-title" className="mt-1 text-2xl font-bold tracking-tight text-slate-950">{mode === 'report' ? 'Nhận xét và điểm số' : mode === 'result' ? 'Câu trả lời của bạn' : 'Làm bài phỏng vấn'}</h2>
+        <p className="mt-2 text-sm leading-6 text-slate-600">
+          {mode === 'report'
+            ? 'Báo cáo AI là bước riêng sau khi bạn đã xem lại bài làm.'
+            : mode === 'result'
+            ? 'Xem lại 10 câu đã trả lời hoặc bỏ qua, sau đó chuyển sang báo cáo đánh giá.'
+            : 'Trả lời từng câu theo thứ tự. Ở câu cuối, xác nhận nộp bài để chuyển sang Kết quả.'}
+        </p>
       </div>
-      {mode !== 'interview' && (
-        <InterviewHistory
-          applicationId={applicationId}
-          selectedSessionId={session?.id || null}
-          onSelectSession={loadSessionById}
-          onAttemptCreated={loadSessionById}
-        />
-      )}
-      {mode === 'full' && (
-        <>
-          <InterviewProgressDashboard applicationId={applicationId} />
-        </>
-      )}
 
       {/* 3. Active Session Details / Answering Interface / Transcript */}
       {progress?.status === 'completed' ? (
         <div className="border-t border-slate-200 pt-8">
-          <div className="mb-7 border-l-4 border-emerald-500 bg-emerald-50/70 p-5">
-            <p className="mb-1 text-xs font-semibold tracking-[0.12em] text-emerald-700 uppercase">Phiên luyện đã hoàn tất</p>
-            <h2 className="text-2xl font-bold tracking-tight text-emerald-950">
-              Hoàn thành buổi phỏng vấn {session ? `(Lần luyện số ${session.attempt_number})` : ''}
-            </h2>
-            <p className="mt-2 text-sm leading-6 text-emerald-800">
+          {mode === 'interview' ? (
+            <>
+              <div className="rounded-2xl border border-emerald-200 bg-emerald-50/70 p-6 sm:p-8">
+                <p className="text-xs font-bold tracking-[0.12em] text-emerald-800 uppercase">Đã xong 10/10 câu</p>
+                <h3 className="mt-2 text-2xl font-bold tracking-tight text-slate-950">Buổi luyện đã hoàn thành</h3>
+                <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-700">
+                  Câu trả lời của bạn đã được lưu. Sang Kết quả để xem lại từng câu và yêu cầu AI đánh giá khi bạn sẵn sàng.
+                </p>
+                <Link href={`/result?sessionId=${progress.session_id}`} className="mt-6 inline-flex rounded-xl bg-blue-700 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-800">
+                  Xem kết quả buổi luyện →
+                </Link>
+              </div>
+            </>
+          ) : (
+          <>
+          {mode === 'result' ? (
+          <>
+          <div className="mb-7 rounded-2xl border border-emerald-200/90 bg-gradient-to-r from-emerald-50/90 via-emerald-50/40 to-white p-6 shadow-xs sm:p-7">
+            <div className="flex items-center gap-3.5">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-xs shadow-emerald-500/20 text-xl">
+                🎉
+              </div>
+              <div>
+                <p className="text-[11px] font-bold tracking-[0.14em] text-emerald-700 uppercase">Phiên luyện đã hoàn tất</p>
+                <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-emerald-950">
+                  Hoàn thành buổi phỏng vấn {session ? `(Lần luyện số ${session.attempt_number})` : ''}
+                </h2>
+              </div>
+            </div>
+            <p className="mt-2.5 text-sm leading-6 text-emerald-900">
               Bạn đã hoàn thành toàn bộ {progress.total_questions} câu hỏi phỏng vấn.
             </p>
+            <Link href={`/report?sessionId=${progress.session_id}`} className="mt-5 inline-flex rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200">Xem báo cáo đánh giá →</Link>
           </div>
 
           <h3 className="mb-4 text-xl font-semibold text-slate-950">Bản ghi câu trả lời (Transcript)</h3>
@@ -424,25 +469,27 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
               </article>
             ))}
           </div>
-          <InterviewEvaluation
-            sessionId={progress.session_id}
-            attemptNumber={session?.attempt_number}
-            showCompletionLinks={mode === 'interview'}
-            userAnswers={Object.fromEntries(
-              progress.responses.map((r) => [r.order_index, r.answer_text])
-            )}
-          />
-          {mode === 'result' && (
-            <div className="mt-7 border-t border-slate-200 pt-6 text-right">
-              <Link href="/progress" className="inline-flex rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">Xem tiến bộ qua các lần luyện</Link>
-            </div>
+          </>
+          ) : (
+            <>
+              <InterviewEvaluation
+                sessionId={progress.session_id}
+                attemptNumber={session?.attempt_number}
+                showCompletionLinks
+                userAnswers={Object.fromEntries(
+                  progress.responses.map((r) => [r.order_index, r.answer_text])
+                )}
+              />
+            </>
+          )}
+          </>
           )}
         </div>
-      ) : mode === 'result' ? (
+      ) : mode === 'result' || mode === 'report' ? (
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-center">
-          <p className="text-sm font-semibold text-slate-900">Chưa có kết quả hoàn chỉnh để hiển thị</p>
-          <p className="mt-2 text-sm leading-6 text-slate-600">Hãy hoàn thành một buổi phỏng vấn, sau đó quay lại đây để xem transcript và đánh giá.</p>
-          <Link href="/interview" className="mt-5 inline-flex rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">Đi tới phỏng vấn</Link>
+          <p className="text-sm font-semibold text-slate-900">Chưa có bài đã nộp để xem</p>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Hoàn thành một buổi luyện trước, hoặc chọn bài cũ trong trang Tiến bộ.</p>
+          <Link href="/interview" className="mt-5 inline-flex rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">Đi tới buổi luyện</Link>
         </div>
       ) : progress?.status === 'in_progress' && progress.current_question ? (
         <div className="border-t border-slate-200 pt-8">
@@ -571,44 +618,61 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
               </div>
             )}
 
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            {isFinalQuestion && finalAction && (
+              <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-4" role="group" aria-label="Xác nhận nộp bài">
+                <p className="font-semibold text-slate-950">Nộp bài và kết thúc buổi luyện?</p>
+                <p className="mt-1 text-sm leading-6 text-slate-600">Đây là câu cuối. Sau khi nộp, bạn sẽ xem lại bài làm ở trang Kết quả và không thể sửa câu trả lời.</p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <button type="button" onClick={() => handleSubmitResponse(finalAction === 'skip')} disabled={submitting} className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:opacity-50">
+                    {submitting ? 'Đang nộp bài...' : finalAction === 'skip' ? 'Xác nhận bỏ qua và nộp bài' : 'Xác nhận nộp bài'}
+                  </button>
+                  <button type="button" onClick={() => setFinalAction(null)} disabled={submitting} className="rounded-lg px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-white focus-visible:ring-4 focus-visible:ring-blue-200">Quay lại câu trả lời</button>
+                </div>
+              </div>
+            )}
+            {!finalAction && <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <button
-                onClick={() => handleSubmitResponse(false)}
+                onClick={() => isFinalQuestion ? setFinalAction('answer') : handleSubmitResponse(false)}
                 disabled={submitting || answerText.trim().length === 0 || answerText.length > 10000}
                 className="btn-primary-glow inline-flex items-center justify-center rounded-lg bg-blue-700 px-6 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 {submitting && <span className="spinner-inline mr-2" aria-hidden="true" />}
-                {submitting ? 'Đang gửi...' : 'Gửi câu trả lời'}
+                {submitting ? 'Đang lưu...' : isFinalQuestion ? 'Nộp bài' : 'Lưu câu trả lời và sang câu tiếp'}
               </button>
 
               <button
-                onClick={() => handleSubmitResponse(true)}
+                onClick={() => isFinalQuestion ? setFinalAction('skip') : handleSubmitResponse(true)}
                 disabled={submitting}
                 className="rounded-lg px-5 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-100 hover:text-slate-900 focus-visible:ring-4 focus-visible:ring-slate-200 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                Bỏ qua câu này
+                {isFinalQuestion ? 'Bỏ qua câu cuối và nộp bài' : 'Bỏ qua câu này'}
               </button>
-            </div>
+            </div>}
           </article>
         </div>
       ) : session?.status === 'ready' ? (
         <div className="panel-reveal space-y-6 border-t border-slate-200 pt-8">
-          <div className="flex flex-col gap-4 rounded-xl border-l-4 border-blue-600 bg-blue-50/70 p-5 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <h3 className="font-semibold text-blue-950">
-                Bộ câu hỏi đã sẵn sàng! (Lần luyện số {session.attempt_number})
-              </h3>
-              <p className="mt-1 text-sm text-blue-800">
-                Gồm 10 câu hỏi phù hợp với hồ sơ ứng tuyển của bạn.
-              </p>
+          <div className="flex flex-col gap-4 rounded-2xl border border-blue-200/90 bg-gradient-to-r from-blue-50/90 via-blue-50/40 to-white p-6 shadow-xs sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3.5">
+              <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white shadow-xs shadow-blue-500/20 text-xl">
+                ✨
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-950 sm:text-lg">
+                  {session.mode_display_title || `Bộ câu hỏi đã sẵn sàng! (Lần luyện số ${session.attempt_number})`}
+                </h3>
+                <p className="mt-0.5 text-xs sm:text-sm text-slate-600">
+                  Gồm 10 câu hỏi phù hợp với hồ sơ ứng tuyển của bạn.
+                </p>
+              </div>
             </div>
             <button
               onClick={handleStartInterview}
               disabled={loading}
-              className="btn-primary-glow inline-flex shrink-0 items-center justify-center rounded-lg bg-blue-700 px-6 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:bg-slate-300"
+              className="btn-primary-glow inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-blue-700 px-6 py-3 text-sm font-bold text-white shadow-sm hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:bg-slate-300"
             >
               {loading && <span className="spinner-inline mr-2" aria-hidden="true" />}
-              {loading ? 'Đang khởi động...' : 'Bắt đầu phỏng vấn'}
+              {loading ? 'Đang bắt đầu...' : 'Bắt đầu làm bài'}
             </button>
           </div>
 
@@ -618,78 +682,37 @@ export default function InterviewQuestions({ applicationId, analysisCompleted, m
             </div>
           )}
 
-          <div className="text-xs text-slate-500">Sinh bởi {session.provider}</div>
-          {session.questions.map((q) => (
-            <article key={q.id} className="border-b border-slate-200 py-4 last:border-0">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <h3 className="text-base leading-6 font-medium text-slate-900">
-                  Câu {q.order_index}: {q.question_text}
-                </h3>
-                <div className="flex shrink-0 gap-2 sm:ml-4">
-                  <span className="rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700">
-                    {q.category}
-                  </span>
-                  <span
-                    className={`rounded-md px-2 py-1 text-xs font-medium ${
-                      q.difficulty === 'easy'
-                        ? 'bg-green-50 text-green-700'
-                        : q.difficulty === 'medium'
-                        ? 'bg-yellow-50 text-yellow-700'
-                        : 'bg-red-50 text-red-700'
-                    }`}
-                  >
-                    {q.difficulty}
-                  </span>
-                </div>
-              </div>
-            </article>
-          ))}
         </div>
-      ) : (
-        <div className="rounded-xl border-t border-slate-200 bg-slate-50 p-5 pt-7 sm:p-6">
-          <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">Bước tiếp theo</p>
-          <h3 className="mt-1 text-xl font-bold tracking-tight text-slate-950">Khởi tạo buổi phỏng vấn</h3>
-          <div className="mt-3 text-sm leading-6 text-slate-600">
-            <p className="mb-2">
-              Nội dung CV và JD sẽ được gửi đến nhà cung cấp AI để sinh bộ câu hỏi phỏng vấn phù hợp.
-            </p>
-          </div>
-
-          <label className="mt-5 flex cursor-pointer items-start gap-3 border-t border-slate-200 pt-5 group">
-            <div className="flex h-5 items-center">
-              <input
-                type="checkbox"
-                checked={consent}
-                onChange={(e) => setConsent(e.target.checked)}
-                disabled={loading || session?.status === 'generating'}
-                className="size-4 rounded border border-slate-300 bg-white text-blue-700 focus:ring-4 focus:ring-blue-200 disabled:opacity-50"
-              />
-            </div>
-            <span className="text-sm leading-6 text-slate-700 group-hover:text-slate-950">
-              Tôi đồng ý gửi dữ liệu để tạo bộ câu hỏi phỏng vấn.
-            </span>
-          </label>
-
+      ) : session?.status === 'generation_failed' ? (
+        <div className="rounded-2xl border border-slate-200/90 bg-white p-6 shadow-xs sm:p-8">
+          <h3 className="text-xl font-bold text-slate-950">Chưa tạo được bộ câu hỏi</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Lượt luyện này vẫn được giữ lại. Bạn có thể thử tạo câu hỏi một lần nữa.</p>
           {error && (
-            <div role="alert" className="mt-4 rounded-lg border-l-4 border-red-500 bg-red-50 p-3 text-sm text-red-800">
+            <div role="alert" className="mt-4 rounded-xl border-l-4 border-red-500 bg-red-50 p-3.5 text-sm text-red-800">
               {error}
             </div>
           )}
-
-          <button
-            onClick={handleGenerate}
-            disabled={!consent || loading || session?.status === 'generating'}
-            className="btn-primary-glow mt-5 inline-flex w-full items-center justify-center rounded-lg bg-blue-700 px-6 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-300 sm:w-auto"
-          >
-            {(loading || session?.status === 'generating') && (
-              <span className="spinner-inline mr-2" aria-hidden="true" />
-            )}
-            {loading || session?.status === 'generating'
-              ? 'Đang tạo câu hỏi...'
-              : session?.status === 'generation_failed'
-              ? 'Thử lại'
-              : 'Tạo bộ câu hỏi phỏng vấn'}
-          </button>
+          <label className="mt-5 flex items-start gap-3 text-sm leading-6 text-slate-700">
+            <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} disabled={loading} className="mt-1 size-4 rounded border-slate-300 text-blue-700 focus:ring-blue-200" />
+            Tôi đồng ý gửi lại dữ liệu hồ sơ để AI tạo bộ câu hỏi.
+          </label>
+          <div className="mt-5">
+            <button
+              onClick={handleRetryGeneration}
+              disabled={!consent || loading}
+              className="btn-primary-glow rounded-xl bg-blue-700 px-6 py-3 text-sm font-bold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-not-allowed disabled:bg-slate-300"
+            >
+              {loading ? 'Đang tạo lại...' : 'Thử tạo lại câu hỏi'}
+            </button>
+          </div>
+        </div>
+      ) : session?.status === 'generating' ? (
+        <div className="rounded-2xl bg-blue-50 p-6 text-sm text-blue-900" role="status">Bộ câu hỏi đang được tạo. Vui lòng chờ trong giây lát rồi tải lại trang.</div>
+      ) : (
+        <div className="rounded-2xl bg-slate-50 p-7">
+          <h3 className="text-xl font-bold text-slate-950">Chưa có bài luyện đang mở</h3>
+          <p className="mt-2 text-sm leading-6 text-slate-600">Chọn chế độ và tạo bộ câu hỏi trước khi bắt đầu trả lời.</p>
+          <Link href="/practice" className="mt-5 inline-flex rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200">Chọn bài luyện →</Link>
         </div>
       )}
     </section>

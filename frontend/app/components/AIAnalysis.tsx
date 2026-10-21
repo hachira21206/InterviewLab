@@ -96,7 +96,6 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
   const [error, setError] = useState<string | null>(null);
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<string>('pending');
-  const [providerName, setProviderName] = useState<string>('Groq Free API');
   
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -125,7 +124,6 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
                if (data.analysis_data) setAnalysis(data.analysis_data);
             }
             setStatus(data.status);
-            if (data.provider) setProviderName(data.provider);
           } else {
             setError('Dữ liệu trả về không hợp lệ');
           }
@@ -188,7 +186,6 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
             setAnalysis(data.analysis_data);
           }
           setStatus(data.status);
-          if (data.provider) setProviderName(data.provider);
         } else {
           setError('Dữ liệu trả về không hợp lệ');
         }
@@ -212,7 +209,7 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
   return (
     <section className="mt-9 border-t border-slate-200 pt-8" aria-labelledby="analysis-title">
       <div className="mb-6">
-        <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">03 · Phân tích hồ sơ</p>
+        <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">Phân tích hồ sơ</p>
         <h2 id="analysis-title" className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Phân tích CV và vị trí ứng tuyển</h2>
         <p className="mt-2 text-sm leading-6 text-slate-600">Xác định điểm mạnh, khoảng trống kiến thức và trọng tâm nên luyện trước buổi phỏng vấn.</p>
       </div>
@@ -314,13 +311,11 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
               ))}
             </div>
           </div>
-          
-          <div className="text-right text-xs text-slate-400">Provider: {providerName}</div>
           {!showInterviewQuestions && (
             <div className="flex flex-wrap items-center justify-between gap-4 border-t border-slate-200 pt-6">
               <p className="text-sm text-slate-600">Bạn đã có đủ ngữ cảnh để tạo bộ câu hỏi phỏng vấn.</p>
-              <Link href="/interview" className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">
-                Sang phần phỏng vấn
+              <Link href="/practice" className="rounded-lg bg-blue-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-800">
+                Chọn bài luyện →
               </Link>
             </div>
           )}
@@ -329,8 +324,7 @@ export default function AIAnalysis({ applicationId, cvDocument, jobDescription, 
         <div className="rounded-xl bg-slate-50 p-5 sm:p-6">
           <div className="grid gap-5 sm:grid-cols-[1fr_auto] sm:items-start">
             <div className="text-sm leading-6 text-slate-600">
-              <p><strong className="font-semibold text-slate-800">Provider:</strong> {providerName}</p>
-              <p className="mt-2 max-w-xl">Nội dung CV và Job Description sẽ được gửi đến nhà cung cấp AI bên ngoài để thực hiện phân tích.</p>
+              <p className="max-w-xl">Nội dung CV và Job Description sẽ được gửi đến nhà cung cấp AI bên ngoài để thực hiện phân tích.</p>
             </div>
             <dl className="grid grid-cols-2 gap-3 text-xs">
               <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">

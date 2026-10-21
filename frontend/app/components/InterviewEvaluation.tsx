@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useState, useEffect, useRef } from 'react';
 import { isSameRounded2, roundAverage2, toRoundedCents, roundAverageScores } from '../types/progress';
+import { VALID_QUESTION_CATEGORIES, VALID_QUESTION_DIFFICULTIES } from '../types/interview';
 
 type EvaluationStatus = 'pending' | 'evaluating' | 'evaluated' | 'evaluation_failed';
 type ReadinessLevel = 'needs_foundation' | 'developing' | 'intern_ready' | 'strong_intern_candidate';
@@ -59,15 +60,6 @@ interface InterviewEvaluationResponse {
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VALID_CATEGORIES = [
-  'backend_fundamentals',
-  'cv_experience',
-  'database',
-  'system_design',
-  'debugging',
-  'behavioral',
-];
-const VALID_DIFFICULTIES = ['easy', 'medium', 'hard'];
 const VALID_CONFIDENCES = ['low', 'medium', 'high'];
 
 function isApiError(value: unknown): value is { detail: string } {
@@ -86,8 +78,8 @@ function isResponseEvaluationDetail(data: unknown): data is ResponseEvaluationDe
   if (typeof d.interview_response_id !== 'string' || !UUID_REGEX.test(d.interview_response_id)) return false;
   if (typeof d.question_order !== 'number' || !Number.isInteger(d.question_order) || d.question_order < 1 || d.question_order > 10) return false;
   if (typeof d.question_text !== 'string' || d.question_text.trim().length === 0) return false;
-  if (typeof d.category !== 'string' || !VALID_CATEGORIES.includes(d.category)) return false;
-  if (typeof d.difficulty !== 'string' || !VALID_DIFFICULTIES.includes(d.difficulty)) return false;
+  if (typeof d.category !== 'string' || !VALID_QUESTION_CATEGORIES.includes(d.category as typeof VALID_QUESTION_CATEGORIES[number])) return false;
+  if (typeof d.difficulty !== 'string' || !VALID_QUESTION_DIFFICULTIES.includes(d.difficulty as typeof VALID_QUESTION_DIFFICULTIES[number])) return false;
   if (typeof d.is_skipped !== 'boolean') return false;
 
   if (d.is_skipped) {
@@ -576,7 +568,7 @@ export default function InterviewEvaluation({
       <section className="panel-reveal mt-8 space-y-8 border-t border-slate-200 pt-8" aria-labelledby="evaluation-report-title">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-200 pb-6 md:flex-row md:items-end">
           <div>
-            <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">05 · Kết quả buổi luyện</p>
+            <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">Kết quả buổi luyện</p>
             <h2 id="evaluation-report-title" className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Báo cáo Đánh giá Buổi phỏng vấn</h2>
             <p className="mt-1 text-sm text-slate-500">Đánh giá tự động theo Rubric chuẩn Backend Developer Intern</p>
           </div>
@@ -587,16 +579,10 @@ export default function InterviewEvaluation({
             {showCompletionLinks && (
               <div className="flex flex-wrap items-center gap-2">
                 <Link
-                  href="/result"
+                  href="/progress"
                   className="inline-flex items-center rounded-lg bg-blue-700 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-blue-800 focus-visible:ring-4 focus-visible:ring-blue-200"
                 >
-                  Xem kết quả đầy đủ
-                </Link>
-                <Link
-                  href="/progress"
-                  className="inline-flex items-center rounded-lg px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-100 focus-visible:ring-4 focus-visible:ring-slate-100"
-                >
-                  Xem tiến bộ
+                  Xem tiến bộ →
                 </Link>
               </div>
             )}

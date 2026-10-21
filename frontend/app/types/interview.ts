@@ -1,6 +1,8 @@
 // Shared Interview Types and Runtime Type Guards for Antigravity Frontend
 
 export type SessionStatus = 'generating' | 'ready' | 'generation_failed' | 'in_progress' | 'completed';
+export type PracticeMode = 'full_mock' | 'focus_category' | 'weakness_recovery';
+
 export type QuestionCategory =
   | 'backend_fundamentals'
   | 'cv_project_experience'
@@ -17,6 +19,36 @@ export const VALID_SESSION_STATUSES: readonly SessionStatus[] = [
   'in_progress',
   'completed',
 ] as const;
+
+export const VALID_PRACTICE_MODES: readonly PracticeMode[] = [
+  'full_mock',
+  'focus_category',
+  'weakness_recovery',
+] as const;
+
+export const PRACTICE_MODE_LABELS: Record<PracticeMode, string> = {
+  full_mock: 'Phỏng vấn tổng hợp',
+  focus_category: 'Luyện theo chuyên đề',
+  weakness_recovery: 'Luyện bù điểm yếu',
+};
+
+export const CATEGORY_LABELS: Record<QuestionCategory, string> = {
+  backend_fundamentals: 'Kiến thức cốt lõi Backend',
+  cv_project_experience: 'Kinh nghiệm dự án & CV',
+  database: 'Cơ sở dữ liệu & SQL',
+  api_web_design: 'Thiết kế API & Web Architecture',
+  debugging_problem_solving: 'Debug & Xử lý sự cố',
+  behavioral_teamwork: 'Kỹ năng mềm & Làm việc nhóm',
+};
+
+export const SHORT_CATEGORY_LABELS: Record<QuestionCategory, string> = {
+  backend_fundamentals: 'Nền tảng Backend',
+  cv_project_experience: 'Dự án trong CV',
+  database: 'Database',
+  api_web_design: 'API & Web Design',
+  debugging_problem_solving: 'Debugging',
+  behavioral_teamwork: 'Behavioral',
+};
 
 export const VALID_QUESTION_CATEGORIES: readonly QuestionCategory[] = [
   'backend_fundamentals',
@@ -49,7 +81,26 @@ export const SENSITIVE_FORBIDDEN_KEYS: readonly string[] = [
   'suggested_answer',
   'missing_points',
   'prompt',
+  'rubric',
+  'sql',
+  'raw_response',
 ] as const;
+
+export function computeModeDisplayTitle(
+  attemptNumber: number,
+  practiceMode: PracticeMode,
+  focusCategory: QuestionCategory | null
+): string {
+  if (practiceMode === 'focus_category' && focusCategory) {
+    const catShort = SHORT_CATEGORY_LABELS[focusCategory] || focusCategory;
+    return `Lần ${attemptNumber} · Luyện ${catShort}`;
+  }
+  if (practiceMode === 'weakness_recovery' && focusCategory) {
+    const catShort = SHORT_CATEGORY_LABELS[focusCategory] || focusCategory;
+    return `Lần ${attemptNumber} · Bù điểm yếu: ${catShort}`;
+  }
+  return `Lần ${attemptNumber} · Phỏng vấn tổng hợp`;
+}
 
 export function isValidUuid(id: unknown): id is string {
   if (typeof id !== 'string') return false;
@@ -102,10 +153,79 @@ export function isInterviewQuestion(data: unknown): data is InterviewQuestionRes
   return true;
 }
 
+export interface WeaknessRecommendationResponse {
+  available: boolean;
+  category: QuestionCategory | null;
+  category_label: string | null;
+  average_score: number | null;
+  evaluated_sessions_count: number;
+  message: string;
+}
+
+export function isWeaknessRecommendationResponse(data: unknown): data is WeaknessRecommendationResponse {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Record<string, unknown>;
+
+  for (const k of SENSITIVE_FORBIDDEN_KEYS) {
+    if (k in d) return false;
+  }
+
+  if (typeof d.available !== 'boolean') return false;
+  if (typeof d.message !== 'string' || d.message.trim() === '') return false;
+
+  if (d.available === false) {
+    if (d.category !== null) return false;
+    if (d.category_label !== null) return false;
+    if (d.average_score !== null) return false;
+    if (
+      typeof d.evaluated_sessions_count !== 'number' ||
+      !Number.isFinite(d.evaluated_sessions_count) ||
+      !Number.isInteger(d.evaluated_sessions_count) ||
+      d.evaluated_sessions_count < 0
+    ) {
+      return false;
+    }
+  } else {
+    if (
+      typeof d.category !== 'string' ||
+      !VALID_QUESTION_CATEGORIES.includes(d.category as QuestionCategory)
+    ) {
+      return false;
+    }
+    const cat = d.category as QuestionCategory;
+    if (d.category_label !== CATEGORY_LABELS[cat]) return false;
+
+    if (
+      typeof d.average_score !== 'number' ||
+      !Number.isFinite(d.average_score) ||
+      d.average_score < 0 ||
+      d.average_score > 10
+    ) {
+      return false;
+    }
+
+    if (
+      typeof d.evaluated_sessions_count !== 'number' ||
+      !Number.isFinite(d.evaluated_sessions_count) ||
+      !Number.isInteger(d.evaluated_sessions_count) ||
+      d.evaluated_sessions_count < 1
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export interface InterviewSessionResponse {
   id: string;
   job_application_id: string;
   attempt_number: number;
+  practice_mode: PracticeMode;
+  focus_category: QuestionCategory | null;
+  practice_mode_label: string;
+  focus_category_label: string | null;
+  mode_display_title: string;
   status: SessionStatus;
   provider: string;
   model: string;
@@ -125,18 +245,43 @@ export function isInterviewSessionResponse(
   const d = data as Record<string, unknown>;
 
   // Forbidden sensitive keys
-  for (const k of ['expected_key_points', 'purpose', 'source', 'source_evidence']) {
+  for (const k of SENSITIVE_FORBIDDEN_KEYS) {
     if (k in d) return false;
   }
 
   if (!isValidUuid(d.id) || !isValidUuid(d.job_application_id)) return false;
-  if (expectedAppId && d.job_application_id !== expectedAppId) return false;
+  if (expectedAppId && (!isValidUuid(expectedAppId) || d.job_application_id !== expectedAppId)) return false;
 
   if (
     typeof d.attempt_number !== 'number' ||
     !Number.isFinite(d.attempt_number) ||
     !Number.isInteger(d.attempt_number) ||
     d.attempt_number < 1
+  ) {
+    return false;
+  }
+
+  if (
+    typeof d.practice_mode !== 'string' ||
+    !VALID_PRACTICE_MODES.includes(d.practice_mode as PracticeMode)
+  ) {
+    return false;
+  }
+
+  if (
+    d.focus_category !== null &&
+    (typeof d.focus_category !== 'string' ||
+      !VALID_QUESTION_CATEGORIES.includes(d.focus_category as QuestionCategory))
+  ) {
+    return false;
+  }
+
+  if (d.practice_mode === 'full_mock' && d.focus_category !== null) {
+    return false;
+  }
+  if (
+    (d.practice_mode === 'focus_category' || d.practice_mode === 'weakness_recovery') &&
+    d.focus_category === null
   ) {
     return false;
   }
@@ -184,6 +329,34 @@ export function isInterviewSessionResponse(
     }
   }
 
+  // Required display fields validation
+  if (
+    typeof d.practice_mode_label !== 'string' ||
+    d.practice_mode_label !== PRACTICE_MODE_LABELS[d.practice_mode as PracticeMode]
+  ) {
+    return false;
+  }
+
+  if (d.practice_mode === 'full_mock') {
+    if (d.focus_category_label !== null) return false;
+  } else {
+    if (
+      typeof d.focus_category_label !== 'string' ||
+      d.focus_category_label !== CATEGORY_LABELS[d.focus_category as QuestionCategory]
+    ) {
+      return false;
+    }
+  }
+
+  const expectedSessionTitle = computeModeDisplayTitle(
+    d.attempt_number as number,
+    d.practice_mode as PracticeMode,
+    d.focus_category as QuestionCategory | null
+  );
+  if (d.mode_display_title !== expectedSessionTitle) {
+    return false;
+  }
+
   return true;
 }
 
@@ -191,6 +364,11 @@ export interface InterviewHistoryItem {
   id: string;
   job_application_id: string;
   attempt_number: number;
+  practice_mode: PracticeMode;
+  focus_category: QuestionCategory | null;
+  practice_mode_label: string;
+  focus_category_label: string | null;
+  mode_display_title: string;
   status: SessionStatus;
   question_count: number;
   answered_count: number;
@@ -204,7 +382,10 @@ export interface InterviewHistoryItem {
   evaluated_at: string | null;
 }
 
-export function isInterviewHistoryItem(data: unknown): data is InterviewHistoryItem {
+export function isInterviewHistoryItem(
+  data: unknown,
+  expectedAppId?: string
+): data is InterviewHistoryItem {
   if (!data || typeof data !== 'object') return false;
   const d = data as Record<string, unknown>;
 
@@ -214,6 +395,7 @@ export function isInterviewHistoryItem(data: unknown): data is InterviewHistoryI
   }
 
   if (!isValidUuid(d.id) || !isValidUuid(d.job_application_id)) return false;
+  if (expectedAppId && (!isValidUuid(expectedAppId) || d.job_application_id !== expectedAppId)) return false;
 
   // attempt_number: finite integer >= 1
   if (
@@ -226,9 +408,62 @@ export function isInterviewHistoryItem(data: unknown): data is InterviewHistoryI
   }
 
   if (
+    typeof d.practice_mode !== 'string' ||
+    !VALID_PRACTICE_MODES.includes(d.practice_mode as PracticeMode)
+  ) {
+    return false;
+  }
+
+  if (
+    d.focus_category !== null &&
+    (typeof d.focus_category !== 'string' ||
+      !VALID_QUESTION_CATEGORIES.includes(d.focus_category as QuestionCategory))
+  ) {
+    return false;
+  }
+
+  if (d.practice_mode === 'full_mock' && d.focus_category !== null) {
+    return false;
+  }
+  if (
+    (d.practice_mode === 'focus_category' || d.practice_mode === 'weakness_recovery') &&
+    d.focus_category === null
+  ) {
+    return false;
+  }
+
+  if (
     typeof d.status !== 'string' ||
     !VALID_SESSION_STATUSES.includes(d.status as SessionStatus)
   ) {
+    return false;
+  }
+
+  // Required display fields validation
+  if (
+    typeof d.practice_mode_label !== 'string' ||
+    d.practice_mode_label !== PRACTICE_MODE_LABELS[d.practice_mode as PracticeMode]
+  ) {
+    return false;
+  }
+
+  if (d.practice_mode === 'full_mock') {
+    if (d.focus_category_label !== null) return false;
+  } else {
+    if (
+      typeof d.focus_category_label !== 'string' ||
+      d.focus_category_label !== CATEGORY_LABELS[d.focus_category as QuestionCategory]
+    ) {
+      return false;
+    }
+  }
+
+  const expectedHistoryTitle = computeModeDisplayTitle(
+    d.attempt_number as number,
+    d.practice_mode as PracticeMode,
+    d.focus_category as QuestionCategory | null
+  );
+  if (d.mode_display_title !== expectedHistoryTitle) {
     return false;
   }
 
@@ -308,7 +543,11 @@ export interface InterviewHistoryListResponse {
   offset: number;
 }
 
-export function isInterviewHistoryListResponse(data: unknown): data is InterviewHistoryListResponse {
+export function isInterviewHistoryListResponse(
+  data: unknown,
+  expectedApplicationId: string
+): data is InterviewHistoryListResponse {
+  if (!isValidUuid(expectedApplicationId)) return false;
   if (!data || typeof data !== 'object') return false;
   const d = data as Record<string, unknown>;
 
@@ -349,7 +588,7 @@ export function isInterviewHistoryListResponse(data: unknown): data is Interview
 
   if (!Array.isArray(d.items)) return false;
   if (d.items.length > d.limit) return false;
-  if (!d.items.every(isInterviewHistoryItem)) return false;
+  if (!d.items.every((item) => isInterviewHistoryItem(item, expectedApplicationId))) return false;
 
   return true;
 }

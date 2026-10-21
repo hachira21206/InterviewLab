@@ -25,12 +25,19 @@ class SessionStatus(str, Enum):
     in_progress = "in_progress"
     completed = "completed"
 
+class PracticeMode(str, Enum):
+    full_mock = "full_mock"
+    focus_category = "focus_category"
+    weakness_recovery = "weakness_recovery"
+
 class InterviewSession(Base):
     __tablename__ = "interview_sessions"
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     job_application_id = Column(PG_UUID(as_uuid=True), ForeignKey("job_applications.id", ondelete="CASCADE"), nullable=False)
     attempt_number = Column(Integer, nullable=False, default=1)
+    practice_mode = Column(String(50), nullable=False, default="full_mock", server_default="full_mock")
+    focus_category = Column(String(50), nullable=True)
     status = Column(String(50), nullable=False)
     provider = Column(String(50), nullable=False)
     model = Column(String(100), nullable=False)
@@ -55,6 +62,16 @@ class InterviewSession(Base):
         CheckConstraint(
             "status IN ('generating', 'ready', 'generation_failed', 'in_progress', 'completed')",
             name="check_session_status"
+        ),
+        CheckConstraint(
+            "practice_mode IN ('full_mock', 'focus_category', 'weakness_recovery')",
+            name="check_interview_session_practice_mode"
+        ),
+        CheckConstraint(
+            "(practice_mode = 'full_mock' AND focus_category IS NULL) OR "
+            "(practice_mode IN ('focus_category', 'weakness_recovery') AND "
+            "focus_category IN ('backend_fundamentals', 'cv_project_experience', 'database', 'api_web_design', 'debugging_problem_solving', 'behavioral_teamwork'))",
+            name="check_interview_session_focus_category"
         ),
         CheckConstraint(
             "attempt_number >= 1",

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 type AppFrameProps = {
   children: ReactNode;
-  current?: 'home' | 'prepare' | 'analysis' | 'interview' | 'result' | 'progress';
+  current?: 'home' | 'prepare' | 'analysis' | 'practice' | 'interview' | 'result' | 'report' | 'progress';
 };
 
 const NAV_ITEMS: Array<{
@@ -15,9 +15,11 @@ const NAV_ITEMS: Array<{
   { href: '/', label: 'Trang chủ', key: 'home' },
   { href: '/prepare', label: 'Hồ sơ', key: 'prepare', step: '01' },
   { href: '/analysis', label: 'Phân tích', key: 'analysis', step: '02' },
-  { href: '/interview', label: 'Phỏng vấn', key: 'interview', step: '03' },
-  { href: '/result', label: 'Kết quả', key: 'result', step: '04' },
-  { href: '/progress', label: 'Tiến bộ', key: 'progress', step: '05' },
+  { href: '/practice', label: 'Chọn bài', key: 'practice', step: '03' },
+  { href: '/interview', label: 'Làm bài', key: 'interview', step: '04' },
+  { href: '/result', label: 'Kết quả', key: 'result', step: '05' },
+  { href: '/report', label: 'Báo cáo', key: 'report', step: '06' },
+  { href: '/progress', label: 'Tiến bộ', key: 'progress', step: '07' },
 ];
 
 export default function AppFrame({ children, current }: AppFrameProps) {

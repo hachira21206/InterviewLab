@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, Tuple
 import httpx
 import json
+import re
 from app.core.config import settings
 from app.schemas.application_analysis import CandidateAnalysis
 from app.schemas.interview_questions import InterviewQuestionSet
@@ -385,15 +386,36 @@ class FakeAnalysisProvider(AIAnalysisProvider):
         from app.models.interview_question import QuestionCategory, QuestionDifficulty, QuestionSource
         from app.schemas.interview_questions import InterviewQuestionGenerated
         
+        focus_match = re.search(r"<!-- FOCUS_CATEGORY: (\w+) -->", input_data.system_prompt)
+        if focus_match:
+            from app.prompts.interview_questions import get_focus_other_categories
+            focus_cat = QuestionCategory(focus_match.group(1))
+            other_cats = get_focus_other_categories(focus_cat)
+            slots = [
+                (focus_cat, "easy"),
+                (other_cats[0], "easy"),
+                (focus_cat, "easy"),
+                (other_cats[1], "easy"),
+                (focus_cat, "medium"),
+                (other_cats[2], "medium"),
+                (focus_cat, "medium"),
+                (other_cats[3], "medium"),
+                (focus_cat, "hard"),
+                (other_cats[4], "hard"),
+            ]
+            cats = [s[0].value for s in slots]
+            diffs = [s[1] for s in slots]
+        else:
+            cats = [
+                "backend_fundamentals", "backend_fundamentals",
+                "cv_project_experience", "cv_project_experience",
+                "database", "database",
+                "api_web_design", "api_web_design",
+                "debugging_problem_solving", "behavioral_teamwork"
+            ]
+            diffs = ["easy"] * 4 + ["medium"] * 4 + ["hard"] * 2
+
         questions = []
-        cats = [
-            "backend_fundamentals", "backend_fundamentals",
-            "cv_project_experience", "cv_project_experience",
-            "database", "database",
-            "api_web_design", "api_web_design",
-            "debugging_problem_solving", "behavioral_teamwork"
-        ]
-        diffs = ["easy"] * 4 + ["medium"] * 4 + ["hard"] * 2
         for i in range(10):
             q = InterviewQuestionGenerated(
                 question_text=f"Valid question text {i}",

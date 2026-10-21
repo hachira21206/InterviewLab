@@ -572,7 +572,7 @@ export default function CVUpload({ mode = 'full' }: CVUploadProps) {
       <section aria-labelledby="cv-upload-title">
         <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
           <div>
-            <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">01 · Hồ sơ đầu vào</p>
+            <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">CV đầu vào</p>
             <h2 id="cv-upload-title" className="mt-1 text-2xl font-bold tracking-tight text-slate-950">Tải lên CV</h2>
           </div>
           <p className="text-xs leading-5 text-slate-500">PDF hoặc DOCX · Tối đa 5 MB</p>
@@ -682,7 +682,7 @@ export default function CVUpload({ mode = 'full' }: CVUploadProps) {
 
               <section className="mt-8 border-t border-slate-200 pt-7" aria-labelledby="job-application-title">
                 <div className="mb-5">
-                  <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">02 · Ngữ cảnh ứng tuyển</p>
+                  <p className="text-xs font-semibold tracking-[0.12em] text-blue-700 uppercase">Vị trí ứng tuyển</p>
                   <h3 id="job-application-title" className="mt-1 text-xl font-bold tracking-tight text-slate-950">Thông tin vị trí ứng tuyển</h3>
                   <p className="mt-2 text-sm leading-6 text-slate-600">JD là không bắt buộc, nhưng sẽ giúp câu hỏi sát với công việc bạn đang nhắm tới hơn.</p>
                 </div>

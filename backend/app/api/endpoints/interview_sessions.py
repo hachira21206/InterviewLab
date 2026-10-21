@@ -2,7 +2,7 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
-from app.schemas.interview_questions import InterviewSessionResponse, CreateSessionRequest
+from app.schemas.interview_questions import InterviewSessionResponse, CreateSessionRequest, WeaknessRecommendationResponse
 from app.schemas.interview_response import ResponseSubmitRequest, InterviewProgressResponse
 from app.services.interview_session import InterviewSessionService
 from typing import Optional
@@ -17,7 +17,13 @@ async def create_interview_session(
     request: CreateSessionRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    session = await InterviewSessionService.create_or_retry_session(db, application_id, request.consent_to_external_ai)
+    session = await InterviewSessionService.create_or_retry_session(
+        db,
+        application_id,
+        request.consent_to_external_ai,
+        practice_mode=request.practice_mode,
+        focus_category=request.focus_category,
+    )
     return session
 
 @router.post("/{application_id}/interview-sessions/attempts", response_model=InterviewSessionResponse)
@@ -26,7 +32,13 @@ async def create_interview_attempt(
     request: CreateSessionRequest,
     db: AsyncSession = Depends(get_db)
 ):
-    session = await InterviewSessionService.create_attempt(db, application_id, request.consent_to_external_ai)
+    session = await InterviewSessionService.create_attempt(
+        db,
+        application_id,
+        request.consent_to_external_ai,
+        practice_mode=request.practice_mode,
+        focus_category=request.focus_category,
+    )
     return session
 
 @router.get("/{application_id}/interview-sessions/current", response_model=InterviewSessionResponse)
@@ -36,6 +48,13 @@ async def get_current_session(
 ):
     session = await InterviewSessionService.get_current_session(db, application_id)
     return session
+
+@router.get("/{application_id}/interview-sessions/weakness-recommendation", response_model=WeaknessRecommendationResponse)
+async def get_weakness_recommendation(
+    application_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db)
+):
+    return await InterviewSessionService.get_weakness_recommendation(db, application_id)
 
 from fastapi import Query
 from app.schemas.interview_questions import InterviewHistoryListResponse

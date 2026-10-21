@@ -1,3 +1,4 @@
+from typing import Optional, Tuple, List, Dict
 import uuid
 import logging
 import re
@@ -8,11 +9,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 from app.models.job_application import JobApplication
 from app.models.application_analysis import ApplicationAnalysis, AnalysisStatus
-from app.models.interview_session import InterviewSession, SessionStatus
+from app.models.interview_session import InterviewSession, SessionStatus, PracticeMode
 from app.models.interview_question import InterviewQuestion, QuestionCategory, QuestionDifficulty
+from app.models.interview_evaluation import InterviewEvaluation, EvaluationStatus
 from app.services.analysis_provider import get_analysis_provider, AnalysisInput
-from app.prompts.interview_questions import INTERVIEW_SYSTEM_PROMPT, build_interview_user_prompt, INTERVIEW_PROMPT_VERSION, INTERVIEW_SCHEMA_VERSION
-from app.schemas.interview_questions import InterviewQuestionSet
+from app.prompts.interview_questions import (
+    INTERVIEW_SYSTEM_PROMPT,
+    build_interview_system_prompt,
+    build_interview_user_prompt,
+    INTERVIEW_PROMPT_VERSION,
+    INTERVIEW_SCHEMA_VERSION,
+)
+from app.schemas.interview_questions import (
+    InterviewQuestionSet,
+    WeaknessRecommendationResponse,
+    CATEGORY_LABELS,
+)
 from app.schemas.application_analysis import CandidateAnalysis
 from app.core.config import settings
 from app.core.exceptions import ProviderConfigurationError
@@ -21,15 +33,132 @@ from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
+CATEGORY_TIE_BREAK_PRIORITY = [
+    QuestionCategory.backend_fundamentals,
+    QuestionCategory.database,
+    QuestionCategory.api_web_design,
+    QuestionCategory.debugging_problem_solving,
+    QuestionCategory.cv_project_experience,
+    QuestionCategory.behavioral_teamwork,
+]
+
 
 class InterviewSessionService:
     @classmethod
-    async def create_or_retry_session(cls, db: AsyncSession, application_id: uuid.UUID, consent: bool) -> InterviewSession:
-        return await cls._create_or_retry_attempt_internal(db, application_id, consent, is_new_attempt_endpoint=False)
+    async def calculate_weakness_category(
+        cls, db: AsyncSession, application_id: uuid.UUID
+    ) -> Optional[Tuple[QuestionCategory, float, int]]:
+        """
+        Find completed sessions with evaluated evaluation for the JobApplication,
+        and calculate the category with the lowest average score.
+        Tie-breaker uses deterministic CATEGORY_TIE_BREAK_PRIORITY.
+        Returns (weakness_category, avg_score, evaluated_sessions_count) or None.
+        """
+        stmt = (
+            select(InterviewSession)
+            .options(selectinload(InterviewSession.evaluation))
+            .where(
+                InterviewSession.job_application_id == application_id,
+                InterviewSession.status == SessionStatus.completed,
+            )
+            .order_by(InterviewSession.attempt_number.asc())
+        )
+        sessions = (await db.execute(stmt)).scalars().all()
+
+        evaluated_sessions = [
+            s for s in sessions
+            if s.evaluation and s.evaluation.status == EvaluationStatus.evaluated and s.evaluation.category_scores
+        ]
+
+        if not evaluated_sessions:
+            return None
+
+        category_scores_map: Dict[str, List[float]] = {c.value: [] for c in QuestionCategory}
+        for s in evaluated_sessions:
+            scores = s.evaluation.category_scores or {}
+            for cat_val, score in scores.items():
+                if cat_val in category_scores_map and score is not None:
+                    category_scores_map[cat_val].append(float(score))
+
+        categories_with_scores = {
+            cat_val: scores for cat_val, scores in category_scores_map.items() if scores
+        }
+        if not categories_with_scores:
+            return None
+
+        priority_map = {c.value: idx for idx, c in enumerate(CATEGORY_TIE_BREAK_PRIORITY)}
+
+        ranked = sorted(
+            categories_with_scores.items(),
+            key=lambda item: (
+                sum(item[1]) / len(item[1]),
+                priority_map.get(item[0], 999)
+            )
+        )
+
+        lowest_cat_val, lowest_scores = ranked[0]
+        avg_score = sum(lowest_scores) / len(lowest_scores)
+        return QuestionCategory(lowest_cat_val), avg_score, len(evaluated_sessions)
 
     @classmethod
-    async def create_attempt(cls, db: AsyncSession, application_id: uuid.UUID, consent: bool) -> InterviewSession:
-        return await cls._create_or_retry_attempt_internal(db, application_id, consent, is_new_attempt_endpoint=True)
+    async def get_weakness_recommendation(
+        cls, db: AsyncSession, application_id: uuid.UUID
+    ) -> WeaknessRecommendationResponse:
+        app_record = (await db.execute(
+            select(JobApplication).where(JobApplication.id == application_id)
+        )).scalars().first()
+        if not app_record:
+            raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ ứng tuyển.")
+
+        result = await cls.calculate_weakness_category(db, application_id)
+        if not result:
+            return WeaknessRecommendationResponse(
+                available=False,
+                category=None,
+                category_label=None,
+                average_score=None,
+                evaluated_sessions_count=0,
+                message="Chưa có đủ lịch sử đánh giá để xác định điểm yếu. Vui lòng hoàn thành ít nhất một buổi phỏng vấn có đánh giá trước."
+            )
+
+        weakness_cat, avg_score, count = result
+        cat_label = CATEGORY_LABELS.get(weakness_cat, weakness_cat.value)
+        return WeaknessRecommendationResponse(
+            available=True,
+            category=weakness_cat,
+            category_label=cat_label,
+            average_score=round(avg_score, 2),
+            evaluated_sessions_count=count,
+            message=f"Chuyên đề cần cải thiện: {cat_label} (Điểm TB: {round(avg_score, 1)}/10)."
+        )
+
+    @classmethod
+    async def create_or_retry_session(
+        cls,
+        db: AsyncSession,
+        application_id: uuid.UUID,
+        consent: bool,
+        practice_mode: PracticeMode = PracticeMode.full_mock,
+        focus_category: Optional[QuestionCategory] = None
+    ) -> InterviewSession:
+        return await cls._create_or_retry_attempt_internal(
+            db, application_id, consent, is_new_attempt_endpoint=False,
+            practice_mode=practice_mode, focus_category=focus_category
+        )
+
+    @classmethod
+    async def create_attempt(
+        cls,
+        db: AsyncSession,
+        application_id: uuid.UUID,
+        consent: bool,
+        practice_mode: PracticeMode = PracticeMode.full_mock,
+        focus_category: Optional[QuestionCategory] = None
+    ) -> InterviewSession:
+        return await cls._create_or_retry_attempt_internal(
+            db, application_id, consent, is_new_attempt_endpoint=True,
+            practice_mode=practice_mode, focus_category=focus_category
+        )
 
     @classmethod
     async def _create_or_retry_attempt_internal(
@@ -37,42 +166,30 @@ class InterviewSessionService:
         db: AsyncSession,
         application_id: uuid.UUID,
         consent: bool,
-        is_new_attempt_endpoint: bool
+        is_new_attempt_endpoint: bool,
+        practice_mode: PracticeMode = PracticeMode.full_mock,
+        focus_category: Optional[QuestionCategory] = None
     ) -> InterviewSession:
         if not consent:
             raise HTTPException(status_code=422, detail="Vui lòng xác nhận sự đồng ý.")
-            
+
         # Short transaction with FOR UPDATE lock on JobApplication to serialize concurrent requests
         app_record = (await db.execute(
             select(JobApplication).where(JobApplication.id == application_id).with_for_update()
         )).scalars().first()
         if not app_record:
             raise HTTPException(status_code=404, detail="Không tìm thấy hồ sơ ứng tuyển.")
-            
+
         analysis = (await db.execute(
             select(ApplicationAnalysis).where(ApplicationAnalysis.job_application_id == application_id)
         )).scalars().first()
         if not analysis or analysis.status != AnalysisStatus.completed:
             raise HTTPException(status_code=409, detail="CV chưa được phân tích thành công.")
-            
+
         try:
             analysis_data = CandidateAnalysis(**analysis.analysis_data)
         except ValidationError:
             raise HTTPException(status_code=409, detail="Dữ liệu phân tích ứng viên không hợp lệ.")
-            
-        jd_text = app_record.job_description or ""
-        
-        user_prompt = build_interview_user_prompt(
-            target_role=app_record.target_role,
-            cv_summary=analysis_data.summary_vi,
-            technical_skills=[s.model_dump(mode='json') for s in analysis_data.technical_skills],
-            projects=[p.model_dump(mode='json') for p in analysis_data.projects],
-            jd=jd_text
-        )
-        total_input_chars = len(INTERVIEW_SYSTEM_PROMPT) + len(user_prompt)
-        max_chars = getattr(settings, 'AI_MAX_INTERVIEW_INPUT_CHARS', 20000)
-        if total_input_chars > max_chars:
-            raise HTTPException(status_code=409, detail=f"Tổng dung lượng đầu vào quá lớn. Tối đa {max_chars} ký tự.")
 
         # Check existing active sessions
         active_session = (await db.execute(
@@ -89,40 +206,84 @@ class InterviewSessionService:
             )
             .order_by(InterviewSession.attempt_number.desc())
         )).scalars().first()
-        
+
+        is_retry = False
         if active_session:
             if active_session.status == SessionStatus.ready:
                 if not is_new_attempt_endpoint and len(active_session.questions) == 10:
                     await db.refresh(active_session, ['questions'])
                     return active_session
                 raise HTTPException(status_code=409, detail="Đang có phiên phỏng vấn chưa hoàn thành.")
-                    
+
             if active_session.status in (SessionStatus.generating, SessionStatus.in_progress):
                 raise HTTPException(status_code=409, detail="Đang có phiên phỏng vấn chưa hoàn thành.")
-                
+
             if active_session.status == SessionStatus.generation_failed:
                 if is_new_attempt_endpoint:
                     raise HTTPException(status_code=409, detail="Đang có phiên phỏng vấn chưa hoàn thành.")
+                is_retry = True
 
-                # Retry on the same attempt: obtain provider before altering state
-                try:
-                    provider = get_analysis_provider()
-                except ProviderConfigurationError as e:
-                    raise HTTPException(status_code=503, detail=str(e))
-
-                active_session.status = SessionStatus.generating
-                active_session.error_code = None
-                active_session.error_message = None
-                await db.commit()
-                session_to_process = active_session
+        # Determine effective_practice_mode and effective_focus_category
+        if is_retry:
+            # For retry on existing failed attempt, preserve its mode and category
+            effective_practice_mode = PracticeMode(active_session.practice_mode) if active_session.practice_mode else PracticeMode.full_mock
+            effective_focus_category = QuestionCategory(active_session.focus_category) if active_session.focus_category else None
         else:
-            # No active session: obtain provider before creating row
-            try:
-                provider = get_analysis_provider()
-            except ProviderConfigurationError as e:
-                raise HTTPException(status_code=503, detail=str(e))
+            effective_practice_mode = practice_mode
+            effective_focus_category = None
 
-            # Determine next attempt_number
+            if practice_mode == PracticeMode.full_mock:
+                if focus_category is not None:
+                    raise HTTPException(status_code=422, detail="Chế độ phỏng vấn tổng hợp không được chỉ định focus_category.")
+                effective_focus_category = None
+            elif practice_mode == PracticeMode.focus_category:
+                if not focus_category or not isinstance(focus_category, QuestionCategory):
+                    raise HTTPException(status_code=422, detail="Vui lòng chọn một chuyên đề hợp lệ.")
+                effective_focus_category = focus_category
+            elif practice_mode == PracticeMode.weakness_recovery:
+                if focus_category is not None:
+                    raise HTTPException(status_code=422, detail="Chế độ luyện bù điểm yếu không được truyền focus_category.")
+                weakness_res = await cls.calculate_weakness_category(db, application_id)
+                if not weakness_res:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Chưa có đủ lịch sử đánh giá để xác định điểm yếu. Vui lòng hoàn thành ít nhất một buổi phỏng vấn có đánh giá trước."
+                    )
+                effective_focus_category = weakness_res[0]
+
+        # Build prompts and validate input budget BEFORE claiming session or calling provider
+        jd_text = app_record.job_description or ""
+        if effective_practice_mode == PracticeMode.full_mock or not effective_focus_category:
+            system_prompt = INTERVIEW_SYSTEM_PROMPT
+        else:
+            system_prompt = build_interview_system_prompt(effective_practice_mode, effective_focus_category)
+        user_prompt = build_interview_user_prompt(
+            target_role=app_record.target_role,
+            cv_summary=analysis_data.summary_vi,
+            technical_skills=[s.model_dump(mode='json') for s in analysis_data.technical_skills],
+            projects=[p.model_dump(mode='json') for p in analysis_data.projects],
+            jd=jd_text
+        )
+        total_input_chars = len(system_prompt) + len(user_prompt)
+        max_chars = getattr(settings, 'AI_MAX_INTERVIEW_INPUT_CHARS', 20000)
+        if total_input_chars > max_chars:
+            raise HTTPException(status_code=409, detail=f"Tổng dung lượng đầu vào quá lớn. Tối đa {max_chars} ký tự.")
+
+        # Claim session and obtain provider only AFTER all validations and budget checks pass
+        try:
+            provider = get_analysis_provider()
+        except ProviderConfigurationError as e:
+            raise HTTPException(status_code=503, detail=str(e))
+
+        if is_retry:
+            active_session.status = SessionStatus.generating
+            active_session.error_code = None
+            active_session.error_message = None
+            active_session.provider = settings.AI_PROVIDER
+            active_session.model = settings.get_active_model()
+            await db.commit()
+            session_to_process = active_session
+        else:
             latest_session = (await db.execute(
                 select(InterviewSession)
                 .where(InterviewSession.job_application_id == application_id)
@@ -135,6 +296,8 @@ class InterviewSessionService:
                 job_application_id=application_id,
                 attempt_number=next_attempt,
                 status=SessionStatus.generating,
+                practice_mode=effective_practice_mode.value,
+                focus_category=effective_focus_category.value if effective_focus_category else None,
                 provider=settings.AI_PROVIDER,
                 model=settings.get_active_model(),
                 prompt_version=INTERVIEW_PROMPT_VERSION,
@@ -146,59 +309,79 @@ class InterviewSessionService:
             except IntegrityError:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Đang có phiên phỏng vấn chưa hoàn thành.")
-        
+
         # Row lock is released after commit! Provider call is performed outside DB transactions.
         session_id = session_to_process.id
-        
-        input_data = AnalysisInput(INTERVIEW_SYSTEM_PROMPT, user_prompt, InterviewQuestionSet.model_json_schema())
-        
+
+        input_data = AnalysisInput(system_prompt, user_prompt, InterviewQuestionSet.model_json_schema())
+
         try:
             result = await provider.generate_interview_questions(input_data)
         except Exception:
             logger.exception("Unexpected error calling provider")
             result = None
-            
+
         try:
             if not result or result.error_code:
                 raise ValueError(result.error_code if result else "INTERNAL_ANALYSIS_ERROR", result.error_message if result else "Lỗi hệ thống bất ngờ.")
-                
+
             if not result.data:
                 raise ValueError("INVALID_PROVIDER_RESPONSE", "Phản hồi rỗng từ AI.")
-                
+
             questions = result.data.questions
             if not questions or len(questions) != 10:
                 raise ValueError("INVALID_PROVIDER_RESPONSE", "Không đủ số lượng câu hỏi.")
 
             categories = Counter([q.category.value for q in questions])
             difficulties = Counter([q.difficulty.value for q in questions])
-            
-            if (categories.get("backend_fundamentals", 0) != 2 or
-                categories.get("cv_project_experience", 0) != 2 or
-                categories.get("database", 0) != 2 or
-                categories.get("api_web_design", 0) != 2 or
-                categories.get("debugging_problem_solving", 0) != 1 or
-                categories.get("behavioral_teamwork", 0) != 1):
-                raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ category.")
-                
-            if (difficulties.get("easy", 0) != 4 or
-                difficulties.get("medium", 0) != 4 or
-                difficulties.get("hard", 0) != 2):
-                raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ difficulty.")
-                
+
+            if effective_practice_mode == PracticeMode.full_mock:
+                if (categories.get("backend_fundamentals", 0) != 2 or
+                    categories.get("cv_project_experience", 0) != 2 or
+                    categories.get("database", 0) != 2 or
+                    categories.get("api_web_design", 0) != 2 or
+                    categories.get("debugging_problem_solving", 0) != 1 or
+                    categories.get("behavioral_teamwork", 0) != 1):
+                    raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ category.")
+
+                if (difficulties.get("easy", 0) != 4 or
+                    difficulties.get("medium", 0) != 4 or
+                    difficulties.get("hard", 0) != 2):
+                    raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ difficulty.")
+            else:
+                # Focus category / Weakness recovery
+                if categories.get(effective_focus_category.value, 0) != 5:
+                    raise ValueError("INVALID_PROVIDER_RESPONSE", f"Sai phân bổ category: chuyên đề trọng tâm '{effective_focus_category.value}' phải có đúng 5 câu.")
+
+                for c in QuestionCategory:
+                    if c != effective_focus_category and categories.get(c.value, 0) != 1:
+                        raise ValueError("INVALID_PROVIDER_RESPONSE", f"Sai phân bổ category: chuyên đề bổ trợ '{c.value}' phải có đúng 1 câu.")
+
+                if (difficulties.get("easy", 0) != 4 or
+                    difficulties.get("medium", 0) != 4 or
+                    difficulties.get("hard", 0) != 2):
+                    raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ difficulty.")
+
+                focus_diffs = Counter([q.difficulty.value for q in questions if q.category == effective_focus_category])
+                if (focus_diffs.get("easy", 0) != 2 or
+                    focus_diffs.get("medium", 0) != 2 or
+                    focus_diffs.get("hard", 0) != 1):
+                    raise ValueError("INVALID_PROVIDER_RESPONSE", "Sai phân bổ difficulty cho chuyên đề trọng tâm.")
+
             def normalize_text(text: str) -> str:
                 t = text.casefold().strip()
                 t = re.sub(r'[\?\.\!\,:;\"\']', '', t)
                 t = re.sub(r'\s+', ' ', t)
                 return t
-                
+
             unique_texts = set(normalize_text(q.question_text) for q in questions)
             if len(unique_texts) < 10:
                 raise ValueError("INVALID_PROVIDER_RESPONSE", "Có câu hỏi trùng lặp.")
-                
+
             for q in questions:
                 if q.source.value != "general_backend" and not q.source_evidence:
                     raise ValueError("INVALID_PROVIDER_RESPONSE", "Thiếu evidence cho source.")
-                    
+
             db_questions = []
             for i, q in enumerate(questions, start=1):
                 db_questions.append(InterviewQuestion(
@@ -212,11 +395,11 @@ class InterviewSessionService:
                     source=q.source.value,
                     source_evidence=q.source_evidence
                 ))
-            
+
             # Final Transaction
             await db.execute(delete(InterviewQuestion).where(InterviewQuestion.interview_session_id == session_id))
             db.add_all(db_questions)
-            
+
             from sqlalchemy import func
             stmt = (
                 update(InterviewSession)
@@ -232,7 +415,7 @@ class InterviewSessionService:
             )
             await db.execute(stmt)
             await db.commit()
-            
+
         except ValueError as ve:
             await db.rollback()
             code, msg = ve.args[0], ve.args[1]
@@ -272,7 +455,7 @@ class InterviewSessionService:
                 await db.rollback()
                 logger.exception("Failed to recover interview session state (Exception)")
                 raise HTTPException(status_code=500, detail="Lỗi máy chủ nội bộ.")
-            
+
         sess2 = (await db.execute(select(InterviewSession).options(selectinload(InterviewSession.questions)).where(InterviewSession.id == session_id))).scalars().first()
         await db.refresh(sess2, ['questions'])
         if sess2.status == SessionStatus.ready:
@@ -371,6 +554,8 @@ class InterviewSessionService:
                 id=s.id,
                 job_application_id=s.job_application_id,
                 attempt_number=s.attempt_number,
+                practice_mode=PracticeMode(s.practice_mode) if s.practice_mode else PracticeMode.full_mock,
+                focus_category=QuestionCategory(s.focus_category) if s.focus_category else None,
                 status=s.status,
                 question_count=len(s.questions),
                 answered_count=answered_count,
